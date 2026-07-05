@@ -14,6 +14,68 @@ every request.
 - JWT verified **asymmetrically via the Supabase JWKS endpoint** (RS256/ES256), not the
   legacy HS256 secret
 
+## Authentication
+
+**The backend has no login endpoint.** The frontend authenticates against **Supabase**,
+receives a JWT, and sends it to this API — which only *verifies* it. Credentials never
+reach the backend; role and tenant come from the database (via `GET /api/v1/me`), not the
+token.
+
+![Where authentication happens](docs/auth_flow.png)
+
+1. The frontend signs in at Supabase (`POST /auth/v1/token?grant_type=password`, or
+   `supabase.auth.signInWithPassword()`), which returns an `access_token` (JWT, ES256, 1 h).
+2. The frontend calls this API with `Authorization: Bearer <access_token>`; the API
+   verifies the signature against Supabase's JWKS endpoint on every request.
+
+### Frontend (supabase-js)
+
+```js
+import { createClient } from '@supabase/supabase-js'
+
+// one shared client; the anon key is public and safe in the browser
+export const supabase = createClient(
+  'https://tqkyghashkawgqbnrwaf.supabase.co',
+  'sb_publishable__FHOWZZTWuTAXrGhDRuMPA_Q-y7BF24',
+  { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } }
+)
+
+// log in
+const { data, error } = await supabase.auth.signInWithPassword({ email, password })
+
+// call the backend with the current token
+async function api(path, init = {}) {
+  const { data: { session } } = await supabase.auth.getSession()
+  return fetch(`https://flowdesk-backend.fly.dev/api/v1${path}`, {
+    ...init,
+    headers: { 'Content-Type': 'application/json', ...(init.headers || {}),
+               Authorization: `Bearer ${session?.access_token ?? ''}` },
+  })
+}
+const me = await api('/me').then((r) => r.json())
+```
+
+supabase-js persists and auto-refreshes the session. On a `401` with
+`details.reason == "token_expired"`, call `supabase.auth.refreshSession()` and retry once.
+New users have no password until they follow the Supabase invite/reset email
+(`supabase.auth.updateUser({ password })`).
+
+### Get a token with curl (testing)
+
+```bash
+TOKEN=$(curl -s "https://tqkyghashkawgqbnrwaf.supabase.co/auth/v1/token?grant_type=password" \
+  -H "apikey: sb_publishable__FHOWZZTWuTAXrGhDRuMPA_Q-y7BF24" \
+  -H "Content-Type: application/json" \
+  -d '{"email":"you@example.com","password":"your-password"}' | jq -r .access_token)
+
+curl https://flowdesk-backend.fly.dev/api/v1/me -H "Authorization: Bearer $TOKEN"
+```
+
+The user needs an existing password — set via the invite email, or created in the Supabase
+Dashboard (Authentication → Users → Add user, "Auto Confirm User"). The full per-endpoint
+contract is maintained as a separate Word document (`FlowDesk_API_Contract.docx`), shared
+with the team.
+
 ## Local development
 
 Requires [uv](https://docs.astral.sh/uv/) and Python 3.12+.

@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     app_env: str = "development"
     log_level: str = "info"
     cors_origins: str = "http://localhost:5173"
+    # Where Supabase redirects the emailed invite/set-password link. Must be listed in
+    # the Supabase project's Auth "Redirect URLs", or GoTrue falls back to the Site URL.
+    invite_redirect_url: str = "https://flowdesk.vanelsen.net.au/set-password"
 
     # ---- Database ----
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/flowdesk"

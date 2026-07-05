@@ -30,6 +30,7 @@ class SupabaseAdminClient:
         self._base = settings.supabase_url.rstrip("/")
         self._key = settings.supabase_service_role_key
         self._timeout = settings.admin_api_timeout_seconds
+        self._invite_redirect = settings.invite_redirect_url
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -38,12 +39,24 @@ class SupabaseAdminClient:
             "Content-Type": "application/json",
         }
 
-    async def invite_user(self, *, email: str, name: str) -> uuid.UUID:
-        """Invite a user (sends a set-password email). Returns the new auth user id."""
+    async def invite_user(
+        self, *, email: str, name: str, redirect_to: str | None = None
+    ) -> uuid.UUID:
+        """Invite a user (sends a set-password email). Returns the new auth user id.
+
+        GoTrue redirects the emailed link to ``redirect_to`` (defaults to
+        settings.invite_redirect_url — the frontend /set-password page). The URL must be
+        whitelisted in the Supabase project's Auth "Redirect URLs", otherwise GoTrue
+        silently falls back to the project Site URL.
+        """
         url = f"{self._base}/auth/v1/invite"
         payload = {"email": email, "data": {"name": name}}
+        target = redirect_to if redirect_to is not None else self._invite_redirect
+        params = {"redirect_to": target} if target else None
         async with httpx.AsyncClient(timeout=self._timeout) as client:
-            resp = await client.post(url, json=payload, headers=self._headers())
+            resp = await client.post(
+                url, json=payload, params=params, headers=self._headers()
+            )
         if resp.status_code in (409, 422) and _looks_like_exists(resp.text):
             raise SupabaseUserExistsError(email)
         if resp.status_code >= 400:
