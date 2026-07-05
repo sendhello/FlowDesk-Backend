@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtualenv / uv
+.venv/
+venv/
+
+# Environment / secrets — NEVER commit (Appendix B.3)
+.env
+.env.*
+!.env.example
+
+# Fly / build
+.fly/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
