@@ -22,3 +22,6 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+# Keep local doc artifacts out of git, but track the README's auth diagram.
+docs/**
+!docs/auth_flow.png
