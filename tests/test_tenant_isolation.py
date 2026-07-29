@@ -9,6 +9,7 @@ from tests.conftest import (
     login_as,
     seed_category,
     seed_incident,
+    seed_notification,
     seed_tenant,
     seed_user,
 )
@@ -90,6 +91,44 @@ async def test_cross_tenant_transition_returns_404_and_changes_nothing(client, d
     assert await count_transitions(db, incident_b.id) == 0
     await db.refresh(incident_b)
     assert incident_b.status is IncidentStatus.open
+
+
+async def test_cross_tenant_notification_mark_read_returns_404(client, db):
+    """A notification is personal correspondence: not even a System Admin reaches someone
+    else's, and out of scope is 404 rather than 403 (there is no role gate to produce one).
+    """
+    tenant_a = await seed_tenant(db, "Acme")
+    tenant_b = await seed_tenant(db, "Globex")
+    admin_a = await seed_user(db, tenant_a, Role.tenant_admin, email="a@acme.com")
+    staff_b = await seed_user(db, tenant_b, Role.staff, email="s@globex.com")
+    incident_b = await seed_incident(
+        db, tenant_b, category=await seed_category(db, tenant_b), submitted_by=staff_b
+    )
+    notification_b = await seed_notification(
+        db, tenant_b, user=staff_b, incident=incident_b
+    )
+
+    login_as(admin_a)
+    response = await client.post(f"/api/v1/notifications/{notification_b.id}/read")
+
+    assert response.status_code == 404
+    assert response.json()["error"]["details"]["reason"] == "notification_not_found"
+
+
+async def test_cross_tenant_notification_list_is_empty(client, db):
+    tenant_a = await seed_tenant(db, "Acme")
+    tenant_b = await seed_tenant(db, "Globex")
+    admin_a = await seed_user(db, tenant_a, Role.tenant_admin, email="a@acme.com")
+    staff_b = await seed_user(db, tenant_b, Role.staff, email="s@globex.com")
+    incident_b = await seed_incident(
+        db, tenant_b, category=await seed_category(db, tenant_b), submitted_by=staff_b
+    )
+    await seed_notification(db, tenant_b, user=staff_b, incident=incident_b)
+
+    login_as(admin_a)
+    listed = await client.get("/api/v1/notifications")
+
+    assert listed.json()["pagination"]["total"] == 0
 
 
 async def test_incident_cannot_use_another_tenants_category(client, db):

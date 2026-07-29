@@ -59,7 +59,13 @@ class ValidationError(AppError):
 
 
 class NotImplementedYetError(AppError):
-    """Used by reserved Sprint-2/3 endpoints so the contract is stable but honest."""
+    """Vocabulary for a reserved endpoint: a stable contract that is honest about not
+    being built yet.
+
+    Currently unreferenced — Sprint 3 implemented the last reserved paths and deleted
+    `routes/reserved.py`. Kept because `not_implemented` is a documented `error.code` in
+    the frontend contract, so removing the class would be a contract deletion for no gain.
+    """
 
     status_code = status.HTTP_501_NOT_IMPLEMENTED
     code = "not_implemented"
@@ -98,6 +104,7 @@ def register_exception_handlers(app: FastAPI) -> None:
             status.HTTP_401_UNAUTHORIZED: "unauthorized",
             status.HTTP_403_FORBIDDEN: "forbidden",
             status.HTTP_404_NOT_FOUND: "not_found",
+            status.HTTP_405_METHOD_NOT_ALLOWED: "method_not_allowed",
             status.HTTP_409_CONFLICT: "conflict",
         }.get(exc.status_code, "http_error")
         message = exc.detail if isinstance(exc.detail, str) else "HTTP error"

@@ -129,9 +129,16 @@ Base path `/api/v1`. JWT required on all endpoints except `POST /organizations` 
 | GET | `/api/v1/incidents/{id}/transitions` | any (role-scoped) | Timeline only (UC-11) |
 | POST | `/api/v1/incidents/{id}/transitions` | reviewer / tenant_admin | Workflow transition, idempotent (UC-08, US-10/11) |
 | POST | `/api/v1/incidents/{id}/assign` | tenant_admin | Reassign reviewer (UC-08 A1) |
+| GET | `/api/v1/notifications` | any (recipient-scoped) | Notification panel, newest first (UC-09, US-14) |
+| GET | `/api/v1/notifications/unread-count` | any | Bell badge (UC-09 step 3) |
+| POST | `/api/v1/notifications/{id}/read` | recipient only | Mark one read (UC-09 steps 6-7) |
+| POST | `/api/v1/notifications/read-all` | any | Dismiss all (UC-09 A1) |
+| GET | `/api/v1/analytics/volume` | tenant_admin / system_admin | Incidents per week (UC-10, US-15) |
+| GET | `/api/v1/analytics/status-distribution` | tenant_admin / system_admin | Current status split (UC-10, US-16) |
 
-Sprint 3 endpoints (`/notifications`, `/analytics/*`) are **reserved** and return `501`
-until built, so the contract is stable.
+Nothing is reserved any more: `routes/reserved.py` was deleted when US-15/16 shipped.
+`POST /notifications` and `POST /analytics/*` now answer `405 method_not_allowed` —
+notifications are system-generated and analytics are reads.
 
 ### Workflow (UC-08)
 
@@ -155,6 +162,40 @@ the incident to — so the frontend never re-implements the state machine. It is
 caller-dependent and must not be cached across users. A freshly submitted incident has an
 empty `transitions` array: `workflow_transitions` records state changes only, so there is
 no synthetic "created" event and reassignment writes no row there either.
+
+### Notifications (UC-09)
+
+A real state change notifies the incident's **submitter**; a reassignment notifies the
+**new reviewer**. Replays, rejected transitions and the caller's own actions notify nobody.
+
+Delivery happens inside the transition's transaction, so a notification that succeeds is
+atomic with the state change that caused it. UC-09 E1 requires the reverse guarantee — a
+delivery failure must not cost the user their state change — so the insert runs inside a
+`SAVEPOINT` and an unavailable recipient is checked for first. Either way the failure is a
+logged no-op (`flowdesk.audit`, `notification_skipped`) and the transition stands. A second
+transaction after the commit was rejected: it would leave a window where the transition is
+durable and the notification is lost for good.
+
+Notifications are personal correspondence, not tenant data: the only visibility rule is
+`user_id == caller`, with no cross-tenant exemption for System Admin. Anything else is
+`404 notification_not_found`, never `403`.
+
+### Analytics (UC-10)
+
+`GET /analytics/volume` buckets incidents by ISO week (Monday-based) **in
+`REPORTING_TIMEZONE`**, not in UTC. This is load-bearing: `created_at` is `timestamptz` and
+the Fly machine clock is UTC, so an incident submitted Monday 09:00 Melbourne is Sunday
+23:00 UTC and a naive `date_trunc('week', created_at)` files it a week early — silently,
+every Monday morning. The response echoes the `timezone` it used.
+
+Every week in the requested range is returned, including zero-count ones, so the frontend
+never has to generate the missing Mondays in the *browser's* timezone. The window defaults
+to the last 12 weeks, snaps outward to whole weeks (and echoes the effective `from`/`to`),
+and is capped at 53 weeks — `422 date_range_too_large` beyond that.
+
+An organisation with no incidents is a `200` with zero-filled buckets and `total: 0`,
+never a `404`. Both endpoints are `tenant_admin`/`system_admin` only: they aggregate every
+incident in the tenant, which is strictly more than a staff or reviewer caller may read.
 
 ## Deployment
 
@@ -284,8 +325,12 @@ flyctl secrets set --app flowdesk-backend \
   CORS_ORIGINS="http://localhost:5173,https://flowdesk.vanelsen.net.au"
 ```
 
-`APP_ENV` and `PORT` come from `[env]` in `fly.toml`, not from secrets. Add
-`FLY_API_TOKEN` to the GitHub repo's **Actions secrets** so `deploy.yml` can authenticate.
+`APP_ENV`, `PORT` and `REPORTING_TIMEZONE` come from `[env]` in `fly.toml`, not from
+secrets — none of them is sensitive. `REPORTING_TIMEZONE` is an IANA name validated at
+start-up, so a typo is a refusal to boot rather than a per-request analytics error; the
+`tzdata` package is a runtime dependency for exactly that reason, since `python:3.12-slim`
+does not guarantee an OS tzdb. Add `FLY_API_TOKEN` to the GitHub repo's **Actions
+secrets** so `deploy.yml` can authenticate.
 `.env` is git-ignored; a `.dockerignore` keeps it (and other cruft) out of the image.
 
 ## Contributing (Appendix B coding standards)

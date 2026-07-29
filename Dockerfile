@@ -8,12 +8,16 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # Install runtime dependencies first (better layer caching).
+# NOTE: this list is maintained by hand and must mirror `pyproject.toml` [project]
+# dependencies. `tzdata` is required, not optional: this base image does not ship a
+# guaranteed /usr/share/zoneinfo, and app.core.config validates REPORTING_TIMEZONE with
+# ZoneInfo() at import time — a missing tzdb is a failure to boot, not a degraded feature.
 COPY pyproject.toml ./
 RUN pip install --upgrade pip && \
     pip install \
         "fastapi>=0.115" "uvicorn[standard]>=0.30" "sqlalchemy[asyncio]>=2.0.30" \
         "asyncpg>=0.29" "alembic>=1.13" "pydantic>=2.7" "pydantic-settings>=2.3" \
-        "pyjwt[crypto]>=2.8" "httpx>=0.27" "email-validator>=2.1"
+        "pyjwt[crypto]>=2.8" "httpx>=0.27" "email-validator>=2.1" "tzdata>=2024.1"
 
 COPY . .
 

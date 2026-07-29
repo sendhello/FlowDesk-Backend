@@ -5,11 +5,12 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from app.api.v1.routes import (
+    analytics,
     auth,
     categories,
     incidents,
+    notifications,
     organizations,
-    reserved,
     users,
 )
 
@@ -19,4 +20,5 @@ api_router.include_router(organizations.router)
 api_router.include_router(categories.router)
 api_router.include_router(users.router)
 api_router.include_router(incidents.router)
-api_router.include_router(reserved.router)
+api_router.include_router(notifications.router)
+api_router.include_router(analytics.router)

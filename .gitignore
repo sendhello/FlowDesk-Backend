@@ -28,3 +28,4 @@ venv/
 docs/**
 !docs/auth_flow.png
 !docs/api-contract-sprint2.md
+!docs/api-contract-sprint3.md
