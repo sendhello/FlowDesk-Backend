@@ -7,8 +7,9 @@ secrets and GitHub Actions secrets.
 """
 
 from functools import lru_cache
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -47,6 +48,30 @@ class Settings(BaseSettings):
 
     # Supabase Admin API base (derived from supabase_url).
     admin_api_timeout_seconds: float = Field(default=10.0)
+
+    # ---- Reporting / analytics (UC-10) ----
+    # `date_trunc('week', <timestamptz>)` renders the value in the SESSION TimeZone, which
+    # is UTC on Fly. An incident submitted Monday 09:00 Melbourne is Sunday 23:00 UTC and
+    # would be bucketed into the previous week, so every analytics query converts
+    # explicitly with AT TIME ZONE. FlowDesk is single-timezone for the MVP: there is no
+    # `tenants.timezone` column and adding one is out of Sprint-3 scope. Pending
+    # confirmation from the product owner.
+    reporting_timezone: str = "Australia/Melbourne"
+
+    @field_validator("reporting_timezone")
+    @classmethod
+    def _validate_reporting_timezone(cls, value: str) -> str:
+        """Fail at start-up, not per request.
+
+        Python's zoneinfo and PostgreSQL both read the IANA tzdb, so a name accepted here
+        is a name `AT TIME ZONE` accepts. Without this check a typo would surface as a
+        PostgreSQL error on every analytics call instead of a refusal to boot.
+        """
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError(f"Unknown IANA timezone: {value!r}") from exc
+        return value
 
     @property
     def cors_origin_list(self) -> list[str]:

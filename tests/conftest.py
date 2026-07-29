@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import datetime
 
 import pytest
 import pytest_asyncio
@@ -23,6 +24,7 @@ from app.main import app as fastapi_app
 from app.models.category import Category
 from app.models.enums import IncidentStatus, Role, Severity, UserStatus
 from app.models.incident import Incident
+from app.models.notification import Notification
 from app.models.tenant import Tenant
 from app.models.user import User
 from app.models.workflow_transition import WorkflowTransition
@@ -61,7 +63,10 @@ async def engine():
 
 @pytest_asyncio.fixture
 async def sessionmaker(engine):
-    return async_sessionmaker(engine, expire_on_commit=False)
+    # Mirrors app/db/session.py::SessionLocal exactly, autoflush included. With autoflush
+    # on, flush ordering around a SAVEPOINT (notification_service._deliver) differs from
+    # production, so the suite must exercise production's semantics.
+    return async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
 
 
 @pytest_asyncio.fixture
@@ -161,6 +166,7 @@ async def seed_incident(
     description: str = "Something broke.",
     severity: Severity = Severity.medium,
     status: IncidentStatus = IncidentStatus.open,
+    created_at: datetime | None = None,
 ) -> Incident:
     incident = Incident(
         tenant_id=tenant.id,
@@ -172,6 +178,11 @@ async def seed_incident(
         severity=severity,
         status=status,
     )
+    if created_at is not None:
+        # Setting the attribute makes SQLAlchemy include the column in the INSERT, which
+        # overrides `server_default=func.now()`. Required by the US-15 week-boundary tests:
+        # the whole point is to place an incident at a specific instant.
+        incident.created_at = created_at
     db.add(incident)
     await db.commit()
     await db.refresh(incident)
@@ -200,6 +211,28 @@ async def seed_transition(
     return transition
 
 
+async def seed_notification(
+    db,
+    tenant: Tenant,
+    *,
+    user: User,
+    incident: Incident,
+    message: str = "Test notification.",
+    is_read: bool = False,
+) -> Notification:
+    notification = Notification(
+        tenant_id=tenant.id,
+        user_id=user.id,
+        incident_id=incident.id,
+        message=message,
+        is_read=is_read,
+    )
+    db.add(notification)
+    await db.commit()
+    await db.refresh(notification)
+    return notification
+
+
 async def count_transitions(db, incident_id) -> int:
     """How many workflow rows exist for an incident — the NFR-06 assertion."""
     from sqlalchemy import func, select
@@ -208,6 +241,22 @@ async def count_transitions(db, incident_id) -> int:
         select(func.count())
         .select_from(WorkflowTransition)
         .where(WorkflowTransition.incident_id == incident_id)
+    )
+    return int(total or 0)
+
+
+async def count_notifications(db, user_id) -> int:
+    """How many notifications a user has — the US-13 analogue of count_transitions.
+
+    A fresh COUNT, so it bypasses the identity map and reflects what is actually
+    committed.
+    """
+    from sqlalchemy import func, select
+
+    total = await db.scalar(
+        select(func.count())
+        .select_from(Notification)
+        .where(Notification.user_id == user_id)
     )
     return int(total or 0)
 

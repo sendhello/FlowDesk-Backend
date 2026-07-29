@@ -38,9 +38,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - run: uv sync
-      - name: Verify migration applies and reverts (T1 acceptance)
+      - name: Verify migration applies, matches the models and reverts (T1 acceptance)
         run: |
           uv run alembic upgrade head
+          # The models and the migrations must describe the same schema: conftest builds
+          # the test database with metadata.create_all, so any drift means the suite runs
+          # against a schema production never sees.
+          uv run alembic check
           uv run alembic downgrade base
       - name: pytest
         run: uv run pytest -q

@@ -4,6 +4,11 @@ NFR-07 requires the system to log all authentication failures and workflow trans
 for audit purposes. Privileged mutations (org creation, user invite, role change,
 deactivation, incident reassignment) are audited by `log_privileged_action`; workflow
 state changes by `log_workflow_transition`.
+
+There is deliberately no `log_notification_created`: NFR-07 asks for auth failures and
+workflow transitions, and a line per delivered notification would bury that signal. Only
+a notification that could NOT be delivered is logged (`log_notification_skipped`), which
+is what UC-09 E1 actually requires.
 """
 
 from __future__ import annotations
@@ -66,6 +71,29 @@ def log_workflow_transition(
         actor_id,
         from_status,
         to_status,
+        _fmt(context),
+    )
+
+
+def log_notification_skipped(
+    *,
+    reason: str,
+    incident_id: str,
+    recipient_id: str,
+    **context: Any,
+) -> None:
+    """UC-09 E1: "System logs the error. The user can still view the incident."
+
+    Emitted when a notification could not be delivered but the state change it accompanies
+    must survive — an unavailable recipient, or an insert that failed inside its SAVEPOINT.
+    WARNING rather than INFO: a skipped notification is a delivery failure, not routine
+    activity, even though it is not fatal to the request.
+    """
+    _audit.warning(
+        "notification_skipped reason=%s incident=%s recipient=%s %s",
+        reason,
+        incident_id,
+        recipient_id,
         _fmt(context),
     )
 
