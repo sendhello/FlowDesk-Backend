@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Generic, TypeVar
 
 from pydantic import BaseModel
 
 T = TypeVar("T")
+
+
+class SortOrder(str, Enum):
+    """Sort direction for any paginated list endpoint."""
+
+    asc = "asc"
+    desc = "desc"
 
 
 class Pagination(BaseModel):

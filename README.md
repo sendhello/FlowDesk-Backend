@@ -108,7 +108,7 @@ uv run pytest -q
 uv run flake8 app tests
 ```
 
-## API surface (Sprint 1)
+## API surface
 
 Base path `/api/v1`. JWT required on all endpoints except `POST /organizations` and
 `GET /health`. Errors use one envelope: `{"error": {"code", "message", "details"}}`.
@@ -123,9 +123,38 @@ Base path `/api/v1`. JWT required on all endpoints except `POST /organizations` 
 | GET/POST | `/api/v1/users` | tenant_admin / system_admin | User management (UC-03) |
 | GET/PATCH | `/api/v1/users/{id}` | admin | User detail / edit role |
 | POST | `/api/v1/users/{id}/deactivate` \| `/activate` | admin | Toggle status |
+| POST | `/api/v1/incidents` | staff | Submit an incident (UC-06, US-08) |
+| GET | `/api/v1/incidents` | any (role-scoped) | List; filter `status`/`severity`, sort, paginate (UC-07, US-09) |
+| GET | `/api/v1/incidents/{id}` | any (role-scoped) | Detail + workflow timeline (UC-11, US-12) |
+| GET | `/api/v1/incidents/{id}/transitions` | any (role-scoped) | Timeline only (UC-11) |
+| POST | `/api/v1/incidents/{id}/transitions` | reviewer / tenant_admin | Workflow transition, idempotent (UC-08, US-10/11) |
+| POST | `/api/v1/incidents/{id}/assign` | tenant_admin | Reassign reviewer (UC-08 A1) |
 
-Sprint 2/3 endpoints (`/incidents`, `/incidents/{id}/transitions`, `/notifications`,
-`/analytics/*`) are **reserved** and return `501` until built, so the contract is stable.
+Sprint 3 endpoints (`/notifications`, `/analytics/*`) are **reserved** and return `501`
+until built, so the contract is stable.
+
+### Workflow (UC-08)
+
+The only legal edges are `open -> in_review -> closed`. A direct `open -> closed` is
+refused with `409 invalid_transition` (UC-08 E1); closing without a resolution note is
+refused with `422 resolution_note_required` (UC-08 E2).
+
+Transitions are **idempotent in effect though POST in method** (NFR-06): idempotency is
+defined over the postcondition, not the request. Asking for a state the incident already
+occupies returns `200` with the current state and writes nothing — no duplicate timeline
+row, no duplicate audit line, no notification. `open` is never the target of a legal edge,
+so `open -> open` is E1 rather than a replay. See `app/services/workflow_service.py`.
+
+Reviewers work from a shared queue: `GET /incidents` shows a reviewer the incidents
+assigned to them **plus** the unassigned ones, and moving an unassigned incident to
+`in_review` claims it. Without this, UC-07's `assigned_to == me` scope combined with
+UC-06's unassigned creation would leave every new incident invisible to every reviewer.
+
+`GET /incidents/{id}` returns `allowed_transitions` — the states **this caller** may move
+the incident to — so the frontend never re-implements the state machine. It is
+caller-dependent and must not be cached across users. A freshly submitted incident has an
+empty `transitions` array: `workflow_transitions` records state changes only, so there is
+no synthetic "created" event and reassignment writes no row there either.
 
 ## Deployment
 
