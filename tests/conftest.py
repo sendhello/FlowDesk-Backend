@@ -20,9 +20,12 @@ from app.api import deps
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app as fastapi_app
-from app.models.enums import Role, UserStatus
+from app.models.category import Category
+from app.models.enums import IncidentStatus, Role, Severity, UserStatus
+from app.models.incident import Incident
 from app.models.tenant import Tenant
 from app.models.user import User
+from app.models.workflow_transition import WorkflowTransition
 from app.services.supabase_admin import (
     SupabaseUserExistsError,
     get_supabase_admin,
@@ -135,6 +138,78 @@ async def seed_user(
     await db.commit()
     await db.refresh(user)
     return user
+
+
+async def seed_category(db, tenant: Tenant, *, name: str | None = None) -> Category:
+    category = Category(
+        tenant_id=tenant.id, name=name or f"Category {uuid.uuid4().hex[:8]}"
+    )
+    db.add(category)
+    await db.commit()
+    await db.refresh(category)
+    return category
+
+
+async def seed_incident(
+    db,
+    tenant: Tenant,
+    *,
+    category: Category,
+    submitted_by: User,
+    assigned_to: User | None = None,
+    title: str = "Test incident",
+    description: str = "Something broke.",
+    severity: Severity = Severity.medium,
+    status: IncidentStatus = IncidentStatus.open,
+) -> Incident:
+    incident = Incident(
+        tenant_id=tenant.id,
+        category_id=category.id,
+        submitted_by=submitted_by.id,
+        assigned_to=assigned_to.id if assigned_to else None,
+        title=title,
+        description=description,
+        severity=severity,
+        status=status,
+    )
+    db.add(incident)
+    await db.commit()
+    await db.refresh(incident)
+    return incident
+
+
+async def seed_transition(
+    db,
+    incident: Incident,
+    *,
+    from_status: IncidentStatus,
+    to_status: IncidentStatus,
+    by: User,
+    note: str | None = None,
+) -> WorkflowTransition:
+    transition = WorkflowTransition(
+        incident_id=incident.id,
+        from_status=from_status,
+        to_status=to_status,
+        transitioned_by=by.id,
+        note=note,
+    )
+    db.add(transition)
+    await db.commit()
+    await db.refresh(transition)
+    return transition
+
+
+async def count_transitions(db, incident_id) -> int:
+    """How many workflow rows exist for an incident — the NFR-06 assertion."""
+    from sqlalchemy import func, select
+
+    total = await db.scalar(
+        select(func.count())
+        .select_from(WorkflowTransition)
+        .where(WorkflowTransition.incident_id == incident_id)
+    )
+    return int(total or 0)
 
 
 # ---- Fake Supabase Admin client -------------------------------------------------

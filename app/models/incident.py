@@ -1,13 +1,23 @@
-"""Incident model. Schema is created in Sprint 1; the endpoints/business logic land in
-Sprint 2 (US-08..US-12)."""
+"""Incident model (UC-06, UC-07, UC-11; US-08..US-12).
+
+Relationships are declared `lazy="raise"` deliberately. Under async SQLAlchemy a
+forgotten eager-load otherwise surfaces as `MissingGreenlet` during response
+serialisation — in production. `raise` turns that into a loud, deterministic failure in
+the test suite instead.
+
+The composite indexes below MUST stay identical to migration `0002_incident_query_indexes`:
+`alembic/env.py` diffs against `Base.metadata`, and `tests/conftest.py` builds the test
+schema with `metadata.create_all` rather than by running migrations.
+"""
 
 from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, Uuid, func
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import DateTime, ForeignKey, Index, String, Text, Uuid, func
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 from app.models.enums import (
@@ -16,6 +26,11 @@ from app.models.enums import (
     incident_status_enum,
     severity_enum,
 )
+
+if TYPE_CHECKING:  # pragma: no cover
+    from app.models.category import Category
+    from app.models.user import User
+    from app.models.workflow_transition import WorkflowTransition
 
 
 class Incident(Base):
@@ -53,4 +68,30 @@ class Incident(Base):
         nullable=False,
         server_default=func.now(),
         onupdate=func.now(),
+    )
+
+    category: Mapped["Category"] = relationship(lazy="raise")
+    # Two FKs point at `users`, so `foreign_keys=` is mandatory to disambiguate.
+    submitter: Mapped["User"] = relationship(foreign_keys=[submitted_by], lazy="raise")
+    assignee: Mapped["User | None"] = relationship(
+        foreign_keys=[assigned_to], lazy="raise"
+    )
+    transitions: Mapped[list["WorkflowTransition"]] = relationship(
+        back_populates="incident",
+        # `created_at` defaults to now(), which in PostgreSQL is *transaction* start
+        # time. Each transition is its own request and therefore its own transaction, so
+        # the timestamps strictly increase; `id` is a deterministic tiebreak regardless.
+        order_by="WorkflowTransition.created_at, WorkflowTransition.id",
+        lazy="raise",
+        passive_deletes=True,  # the FK's ON DELETE CASCADE already does the work
+    )
+
+    __table_args__ = (
+        # PostgreSQL does not index foreign keys automatically. Every role-scoped list
+        # in US-09 filters on one of these alongside tenant_id (NFR-01, NFR-03).
+        Index("ix_incidents_tenant_status", "tenant_id", "status"),
+        Index("ix_incidents_tenant_submitted_by", "tenant_id", "submitted_by"),
+        Index("ix_incidents_tenant_assigned_to", "tenant_id", "assigned_to"),
+        Index("ix_incidents_tenant_created_at", "tenant_id", "created_at"),
+        Index("ix_incidents_category_id", "category_id"),
     )
