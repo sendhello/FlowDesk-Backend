@@ -1,5 +1,9 @@
 # FlowDesk API Contract — Sprint 2 delta
 
+> **SUPERSEDED — kept for history.** The canonical contract is
+> [`api-contract.md`](api-contract.md), which covers all three sprints in one document and
+> corrects four errors in the Sprint-1/2/3 set (see its §7.1). Do not build against this file.
+
 **For:** Bradley Van Elsen (Frontend Lead) · **From:** Ivan Bazhenov (Backend Lead)
 **Covers:** US-08, US-09, US-10, US-11, US-12 (UC-06, UC-07, UC-08, UC-11)
 **Status:** implemented and merged; live at `/docs` and `/openapi.json`

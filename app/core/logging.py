@@ -98,5 +98,25 @@ def log_notification_skipped(
     )
 
 
+def log_compensation_failure(
+    *, action: str, auth_user_id: str, error: str, **context: Any
+) -> None:
+    """A saga's clean-up step failed, leaving an orphan in Supabase Auth.
+
+    Both provisioning sagas delete the auth user when the DB half fails (Part 3A.3). If
+    that delete ALSO fails there is nothing further to try: the caller's error is the one
+    that describes their request, so the compensation failure is recorded and swallowed
+    rather than raised over the top of it. ERROR, not WARNING — an orphaned auth account
+    holds a globally unique email hostage and needs a human.
+    """
+    _audit.error(
+        "compensation_failed action=%s auth_user=%s error=%s %s",
+        action,
+        auth_user_id,
+        error,
+        _fmt(context),
+    )
+
+
 def _fmt(context: dict[str, Any]) -> str:
     return " ".join(f"{k}={v}" for k, v in context.items())

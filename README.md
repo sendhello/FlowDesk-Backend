@@ -108,10 +108,62 @@ uv run pytest -q
 uv run flake8 app tests
 ```
 
+## Demo data seeding
+
+[`scripts/seed_demo.py`](scripts/seed_demo.py) populates a deployed environment with two
+demonstration organisations — 5 users, 6 categories and 40 incidents each, spread over the
+last 12 weeks. It drives the **public API**, not the database, so the workflow state
+machine, the notification hooks, RBAC and tenant scoping all execute normally and the
+resulting data doubles as evidence that the API works.
+
+```bash
+export SEED_DEMO_PASSWORD='<password for the demo accounts>'
+
+uv run python -m scripts.seed_demo --all --dry-run   # print the plan, write nothing
+uv run python -m scripts.seed_demo --all --yes       # purge + seed + backfill
+```
+
+Phases are individually selectable (`--purge`, `--seed`, `--backfill`); `--all` runs all
+three. `--random-seed` makes a run reproducible — the same seed produces the same
+organisations, incidents and timestamps.
+
+Two operations cannot go through the API and are confined to
+[`scripts/seed_db.py`](scripts/seed_db.py):
+
+- **Purge.** Nothing in the product deletes a tenant, user or incident, so re-running needs
+  SQL. It matches tenants by *exact name* and auth users by *exact address* from the
+  fixture catalogue — never a wildcard — so accounts the seeder did not create cannot be
+  caught by it.
+- **Timestamps.** `created_at` is `server_default=now()`; no request can set it. Without a
+  backfill every incident lands in the current week and `/analytics/volume` renders one
+  bar. The pass verifies its own postconditions inside the transaction and rolls back on
+  any violation.
+
+Provisioning users is deliberately a hybrid. `users.id` *is* the Supabase Auth id, and the
+only endpoints that create one (`POST /organizations`, `POST /users`) both call GoTrue
+invite — which sends an email, and the built-in SMTP allows only a couple per hour. Staff
+and reviewers are therefore created in Auth first (confirmed, with a password, **no
+email**) and then through `POST /api/v1/users`, which takes `user_service.invite_user`'s
+existing `SupabaseUserExistsError` recovery branch and provisions the row against that id.
+`register_organization` has no such branch, so **each organisation costs exactly one invite
+email** — two per run, spaced by `--invite-gap` seconds.
+
+Tokens come from Supabase's password grant, exactly as the frontend gets them. Set
+`SUPABASE_ANON_KEY` to the project's publishable key if the `apikey` header is rejected;
+otherwise the service-role key from `.env` is used.
+
 ## API surface
 
 Base path `/api/v1`. JWT required on all endpoints except `POST /organizations` and
-`GET /health`. Errors use one envelope: `{"error": {"code", "message", "details"}}`.
+`GET /health`. Errors use one envelope: `{"error": {"code", "message", "details"}}` — with the
+documented exceptions in [the contract](docs/api-contract.md#314-responses-that-are-not-in-the-envelope).
+
+> **The canonical API contract is [`docs/api-contract.md`](docs/api-contract.md).** It documents
+> every endpoint, every error slug and its trigger, the RBAC and tenant-scoping rules, and the
+> domain semantics that `/openapi.json` cannot express. Read it before wiring a client — in
+> particular §3.1.4, because the error envelope is *not* universal. The table below is a summary
+> only; `docs/api-contract-sprint2.md` and `docs/api-contract-sprint3.md` are superseded and kept
+> for history.
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|

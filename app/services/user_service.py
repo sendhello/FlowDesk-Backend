@@ -21,6 +21,7 @@ from app.models.user import User
 from app.services.supabase_admin import (
     SupabaseAdminClient,
     SupabaseUserExistsError,
+    delete_user_best_effort,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -144,14 +145,14 @@ async def invite_user(
     except IntegrityError:
         await db.rollback()
         if created_auth:
-            await admin.delete_user(auth_id)
+            await delete_user_best_effort(admin, auth_id, action="user_invite")
         raise ConflictError(
             "A user with this email already exists in your organisation."
         )
     except Exception:
         await db.rollback()
         if created_auth:
-            await admin.delete_user(auth_id)
+            await delete_user_best_effort(admin, auth_id, action="user_invite")
         raise
 
     await db.refresh(user)

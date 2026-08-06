@@ -273,8 +273,15 @@ class FakeSupabaseAdmin:
         self.invited: list[uuid.UUID] = []
         self.deleted: list[uuid.UUID] = []
         self._by_email: dict[str, uuid.UUID] = {}
+        # Set to an exception instance to make the corresponding call fail. Supabase is a
+        # network dependency, so "it refused" is a state the API must handle, not an
+        # accident — see tests/test_supabase_failures.py.
+        self.invite_error: Exception | None = None
+        self.delete_error: Exception | None = None
 
     async def invite_user(self, *, email: str, name: str) -> uuid.UUID:
+        if self.invite_error is not None:
+            raise self.invite_error
         if email.lower() in self.existing_emails:
             raise SupabaseUserExistsError(email)
         uid = self.next_id or uuid.uuid4()
@@ -286,6 +293,8 @@ class FakeSupabaseAdmin:
         return self._by_email.get(email.lower())
 
     async def delete_user(self, user_id: uuid.UUID) -> None:
+        if self.delete_error is not None:
+            raise self.delete_error
         self.deleted.append(user_id)
 
 
