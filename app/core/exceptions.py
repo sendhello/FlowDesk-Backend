@@ -17,7 +17,11 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 
 class AppError(Exception):
-    """Base class for all handled application errors."""
+    """Base class for all handled application errors.
+
+    `message` and `details` are RENDERED TO THE CLIENT. Never build either from an upstream
+    response body or an internal exception string — put that in the log instead.
+    """
 
     status_code: int = status.HTTP_500_INTERNAL_SERVER_ERROR
     code: str = "internal_error"
@@ -27,9 +31,12 @@ class AppError(Exception):
         message: str | None = None,
         *,
         details: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
         self.message = message or self.__class__.__name__
         self.details = details or {}
+        #: Response headers this error carries, e.g. `Retry-After` on a 503.
+        self.headers = headers or {}
         super().__init__(self.message)
 
 
@@ -58,6 +65,33 @@ class ValidationError(AppError):
     code = "validation_error"
 
 
+class UpstreamServiceError(AppError):
+    """A dependency this service does not control refused or could not answer.
+
+    502, not 500: the request failed, but nothing in FlowDesk is broken, and the
+    distinction matters to whoever is on call. Supabase Auth is the only such dependency
+    today (see app/services/supabase_admin.py) — every other failure mode is ours.
+
+    Retrying will not help; that is what the subclass below is for.
+    """
+
+    status_code = status.HTTP_502_BAD_GATEWAY
+    code = "upstream_error"
+
+
+class UpstreamUnavailableError(UpstreamServiceError):
+    """...and the reason is transient: a rate limit, a 5xx or a timeout.
+
+    503 plus `Retry-After` where the upstream supplied one, so the same request is worth
+    repeating. GoTrue's built-in SMTP rate limit (`429 over_email_send_rate_limit`) is the
+    case this exists for: it is hit routinely on the free tier and is not an error in the
+    caller's request at all.
+    """
+
+    status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    code = "upstream_unavailable"
+
+
 class NotImplementedYetError(AppError):
     """Vocabulary for a reserved endpoint: a stable contract that is honest about not
     being built yet.
@@ -83,6 +117,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=exc.status_code,
             content=_envelope(exc.code, exc.message, exc.details),
+            headers=exc.headers or None,
         )
 
     @app.exception_handler(RequestValidationError)

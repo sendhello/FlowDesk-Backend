@@ -20,6 +20,7 @@ from app.models.user import User
 from app.services.supabase_admin import (
     SupabaseAdminClient,
     SupabaseUserExistsError,
+    delete_user_best_effort,
 )
 
 
@@ -63,11 +64,11 @@ async def register_organization(
         await db.commit()
     except IntegrityError:
         await db.rollback()
-        await admin.delete_user(auth_id)  # compensation — no orphan
+        await delete_user_best_effort(admin, auth_id, action="org_register")
         raise ConflictError("An organisation with this name already exists.")
     except Exception:
         await db.rollback()
-        await admin.delete_user(auth_id)  # compensation — no orphan
+        await delete_user_best_effort(admin, auth_id, action="org_register")
         raise
 
     await db.refresh(tenant)
