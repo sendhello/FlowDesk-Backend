@@ -2,8 +2,16 @@
 
 from __future__ import annotations
 
-from app.models.enums import Role
-from tests.conftest import login_as, seed_tenant, seed_user
+import pytest
+
+from app.models.enums import IncidentStatus, Role
+from tests.conftest import (
+    login_as,
+    seed_category,
+    seed_incident,
+    seed_tenant,
+    seed_user,
+)
 
 
 async def test_create_and_list_category(client, db):
@@ -58,3 +66,52 @@ async def test_update_and_delete_category(client, db):
 
     deleted = await client.delete(f"/api/v1/categories/{cid}")
     assert deleted.status_code == 204
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        pytest.param(IncidentStatus.open, id="open"),
+        pytest.param(IncidentStatus.in_review, id="in_review"),
+        pytest.param(IncidentStatus.closed, id="closed"),
+    ],
+)
+async def test_delete_referenced_category_returns_409(client, db, status):
+    """D-2. The `closed` case answered a plain-text 500 until Sprint 4.
+
+    `incidents.category_id` is a plain FK with no ON DELETE action, so an incident of ANY
+    status blocks the delete at the database. The guard only excluded closed ones, so a
+    category referenced solely by closed incidents sailed past it and died on the
+    constraint with nothing to catch it.
+    """
+    tenant = await seed_tenant(db, "Acme")
+    admin = await seed_user(db, tenant, Role.tenant_admin)
+    staff = await seed_user(db, tenant, Role.staff, email="staff@acme.com")
+    category = await seed_category(db, tenant, name="Network")
+    await seed_incident(
+        db, tenant, category=category, submitted_by=staff, status=status
+    )
+    login_as(admin)
+
+    resp = await client.delete(f"/api/v1/categories/{category.id}")
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["error"]["details"]["reason"] == "category_in_use"
+
+
+async def test_a_refused_delete_leaves_the_category_intact(client, db):
+    """Proves the refusal is a refusal, not a half-applied delete."""
+    tenant = await seed_tenant(db, "Acme")
+    admin = await seed_user(db, tenant, Role.tenant_admin)
+    staff = await seed_user(db, tenant, Role.staff, email="staff@acme.com")
+    category = await seed_category(db, tenant, name="Network")
+    await seed_incident(
+        db, tenant, category=category, submitted_by=staff, status=IncidentStatus.closed
+    )
+    login_as(admin)
+
+    assert (await client.delete(f"/api/v1/categories/{category.id}")).status_code == 409
+
+    still_there = await client.get(f"/api/v1/categories/{category.id}")
+    assert still_there.status_code == 200, still_there.text
+    assert still_there.json()["name"] == "Network"

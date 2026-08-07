@@ -9,6 +9,10 @@ There is deliberately no `log_notification_created`: NFR-07 asks for auth failur
 workflow transitions, and a line per delivered notification would bury that signal. Only
 a notification that could NOT be delivered is logged (`log_notification_skipped`), which
 is what UC-09 E1 actually requires.
+
+Two loggers, on purpose. `flowdesk.audit` carries the NFR-07 trail and nothing else, so it
+stays readable as an audit record. `flowdesk.errors` carries unhandled exceptions with
+their tracebacks (`log_unhandled_exception`), which would drown that trail if mixed in.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ from typing import Any
 from app.core.config import settings
 
 _AUDIT_LOGGER_NAME = "flowdesk.audit"
+_ERROR_LOGGER_NAME = "flowdesk.errors"
 
 
 def configure_logging() -> None:
@@ -40,6 +45,7 @@ def get_logger(name: str) -> logging.Logger:
 
 
 _audit = logging.getLogger(_AUDIT_LOGGER_NAME)
+_errors = logging.getLogger(_ERROR_LOGGER_NAME)
 
 
 def log_auth_failure(reason: str, **context: Any) -> None:
@@ -115,6 +121,34 @@ def log_compensation_failure(
         auth_user_id,
         error,
         _fmt(context),
+    )
+
+
+def log_unhandled_exception(
+    *, error_id: str, method: str, path: str, exc: BaseException, **context: Any
+) -> None:
+    """An exception escaped every registered handler (D-1).
+
+    The one place in the codebase that passes `exc_info`: this is the only failure whose
+    cause is, by definition, unknown, so the traceback is the whole value of the line.
+
+    `error_id` is the only thing about this failure the client is told. It turns a support
+    report ("I got error 7f3a…") into a single grep. The exception itself never leaves this
+    function — `AppError`'s docstring forbids rendering internal strings, and that applies
+    with more force to an exception nobody anticipated: `str(exc)` on an unhandled error is
+    as likely to hold a connection string or a row of customer data as anything useful.
+
+    On `flowdesk.errors` rather than `flowdesk.audit`, so a stack trace never lands in the
+    middle of the NFR-07 audit trail.
+    """
+    _errors.error(
+        "unhandled_exception error_id=%s method=%s path=%s kind=%s %s",
+        error_id,
+        method,
+        path,
+        type(exc).__name__,
+        _fmt(context),
+        exc_info=exc,
     )
 
 

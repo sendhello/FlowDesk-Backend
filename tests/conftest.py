@@ -88,6 +88,23 @@ async def client(sessionmaker):
     fastapi_app.dependency_overrides.clear()
 
 
+@pytest_asyncio.fixture
+async def anon_client():
+    """Client for requests that never reach a query: validation, redirects, the
+    unhandled-exception envelope.
+
+    Deliberately does NOT depend on `sessionmaker`, so these tests run without
+    `TEST_DATABASE_URL` instead of skipping. `get_db` is left un-overridden — an
+    AsyncSession connects lazily and none of these paths issues a statement — so a test
+    that accidentally does hit the database fails loudly rather than passing on a fixture
+    that was not supposed to be there.
+    """
+    transport = ASGITransport(app=fastapi_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+    fastapi_app.dependency_overrides.clear()
+
+
 # ---- Auth override helpers ------------------------------------------------------
 
 
@@ -278,6 +295,17 @@ class FakeSupabaseAdmin:
         # accident — see tests/test_supabase_failures.py.
         self.invite_error: Exception | None = None
         self.delete_error: Exception | None = None
+        self.lookup_error: Exception | None = None
+
+    def seed_auth_user(self, email: str, user_id: uuid.UUID) -> None:
+        """An auth account that exists without this test having invited it.
+
+        Exactly what a timed-out invite leaves behind: GoTrue created the user and sent
+        the email, then the connection dropped, so the caller saw a failure and the fake
+        (like production) has no record of the attempt. Setting `invite_error` alone
+        cannot express that, because it raises before the account is recorded.
+        """
+        self._by_email[email.lower()] = user_id
 
     async def invite_user(self, *, email: str, name: str) -> uuid.UUID:
         if self.invite_error is not None:
@@ -290,6 +318,8 @@ class FakeSupabaseAdmin:
         return uid
 
     async def get_user_by_email(self, email: str) -> uuid.UUID | None:
+        if self.lookup_error is not None:
+            raise self.lookup_error
         return self._by_email.get(email.lower())
 
     async def delete_user(self, user_id: uuid.UUID) -> None:

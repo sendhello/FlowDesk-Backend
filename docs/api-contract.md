@@ -1,9 +1,9 @@
-# FlowDesk API Contract — v2.0 (complete)
+# FlowDesk API Contract — v2.1 (complete)
 
 **For:** Bradley Van Elsen (Frontend Lead), Fady Tadros (Product Owner) · **From:** Ivan Bazhenov (Backend Lead)
-**Covers:** the entire shipped backend — Sprints 1, 2 and 3 (UC-01 … UC-11, US-01 … US-16)
-**Status:** implemented, merged to `main`, deployed. Verified against the live deployment on 30 July 2026.
-**Supersedes:** `FlowDesk_API_Contract.docx` v1.0, `api-contract-sprint2.md`, `api-contract-sprint3.md`.
+**Covers:** the entire shipped backend — Sprints 1–4 (UC-01 … UC-11, US-01 … US-16)
+**Status:** implemented and merged to `main`. Sprints 1–3 verified against the live deployment on 30 July 2026; the Sprint 4 defect fixes (§7.2) are verified by the test suite and await the next deploy. Two of them — D-15's `https` redirect and D-13's `Content-Type` case — were *reproduced* on production, so both are re-checked there once it ships.
+**Supersedes:** `FlowDesk_API_Contract.docx` v1.0, `api-contract-sprint2.md`, `api-contract-sprint3.md`, and v2.0 of this file.
 
 This is the single canonical contract. It replaces the three documents above — they were a
 Sprint-1 base plus two deltas, which meant answering "what does this endpoint do?" required
@@ -404,13 +404,14 @@ machine-readable discriminator, and it is what you should branch on.
 | 502 | `upstream_error` | ✅ — Supabase Auth refused the call |
 | 503 | `upstream_unavailable` | ✅ — Supabase Auth is transiently unavailable; may carry `Retry-After` |
 | any other 4xx from the router | `http_error` | ✅ — fallback, message is the HTTP phrase |
+| 500 | `internal_error` | ✅ — carries `details.reason = unhandled_exception` and `details.error_id` |
 | 400 | — | ❌ CORS rejection, plain text |
-| 500 | — | ❌ plain text |
 
-**502/503 are new in Sprint 4** and are the only enveloped 5xx. They replace what used to be a
-plain-text `500` on every Supabase Admin failure (D-1, §7.2). A `>= 500` branch that skips
-envelope parsing — like the snippet in §3.1.4 — will now discard a message the user could act on:
-treat `502`/`503` as enveloped and keep the plain-text fallback for `500` only.
+**Every 5xx is now enveloped, `500` included.** `502`/`503` arrived in Sprint 4 for Supabase Admin
+failures; Sprint 4 finished the job with a catch-all for everything else (D-1, §7.2). A `>= 500`
+branch that skips envelope parsing now discards a message and an `error_id` the user could quote:
+parse the envelope on every status. The one response still outside it is the CORS `400`, which is
+written before this application is reached.
 
 `error.code` is `http_error` for any routing-level status outside the five mapped above. It is
 not reachable through normal use today, but a client's `switch` on `error.code` should have a
@@ -454,6 +455,7 @@ discriminator is the message string. Those gaps are tracked as a defect in §7.2
 | `insufficient_role` | `You do not have permission to perform this action.` | Role not in the gate's allow-list. **Also carries `details.required`** — a JSON array of the exact role values accepted, e.g. `["tenant_admin", "system_admin"]`. Render your message from that array rather than hardcoding it. |
 | `privilege_escalation` | `Only System Admins can create System Admin accounts.` | `POST /users` with `role: "system_admin"` from a non-System-Admin |
 | `privilege_escalation` | `Only System Admins can grant the System Admin role.` | `PATCH /users/{id}` setting `role: "system_admin"` from a non-System-Admin |
+| `self_deactivation` | `You cannot deactivate your own account.` | `POST /users/{id}/deactivate` targeting yourself (§4.4). New in Sprint 4 — this used to succeed and lock the caller out permanently (D-3) |
 
 Note the two `privilege_escalation` cases share a slug but have different messages — you cannot
 tell create from grant using `details` alone, only by which endpoint you called.
@@ -469,7 +471,7 @@ tell create from grant using `details` alone, only by which endpoint you called.
 | `notification_not_found` | `Notification not found.` | `POST /notifications/{id}/read` — absent, someone else's, or another tenant's |
 | `—` | `Not Found` | **Starlette's**, for a URL matching no route at all. Same `code` and `details: {}` as a real scope 404, distinguishable only by the message |
 
-**409 `conflict`** — every one carries `details: {}` **except** the two workflow slugs.
+**409 `conflict`** — every one carries `details: {}` **except** the four slugged rows below.
 
 | `details.reason` | Message | Trigger |
 |---|---|---|
@@ -478,7 +480,8 @@ tell create from grant using `details` alone, only by which endpoint you called.
 | `—` | `A user with this email already exists in your organisation.` | `POST /users`: two distinct raise sites emit this identical string |
 | `—` | `A user with this email already exists.` | `POST /users`: registered globally in Supabase and recovery failed |
 | `—` | `A category with this name already exists.` | `POST`/`PATCH /categories`: unique per `(tenant, name)`, compared **exactly** — case- and whitespace-sensitive |
-| `—` | `This category is used by open incidents and cannot be deleted.` | `DELETE /categories/{id}` with at least one referencing incident that is **not closed** |
+| `category_in_use` | `This category is referenced by existing incidents and cannot be deleted.` | `DELETE /categories/{id}` with at least one referencing incident, **of any status**. Both the message and the slug changed in Sprint 4: the old wording said "open incidents", and closed ones blocked the delete too — with a `500` instead of this `409` (D-2) |
+| `last_tenant_admin` | `This is the organisation's last active administrator. Appoint another administrator before changing this account.` | Deactivating, demoting or promoting away the tenant's only active `tenant_admin` — `POST /users/{id}/deactivate` or `PATCH /users/{id}`. New in Sprint 4 (D-3) |
 | `invalid_transition` | `This transition is not permitted from the current state.` | §4.6. **Also carries `from_status`, `to_status`, `allowed`** |
 | `incident_closed` | `A closed incident cannot be reassigned.` | `POST /incidents/{id}/assign` on a closed incident |
 
@@ -509,6 +512,18 @@ sends one; absent that header, back off yourself rather than assuming a delay. `
 itself — surface it and stop. The upstream response body is never included: it is logged
 server-side, because `POST /organizations` is public.
 
+**500 `internal_error`** — the catch-all, new in Sprint 4 (D-1).
+
+| `details.reason` | Message | Trigger |
+|---|---|---|
+| `unhandled_exception` | `An unexpected internal error occurred. Please try again.` | Any failure no other handler claimed. Previously a plain-text `500` outside the envelope — and, because it was written outside the CORS layer, a browser reported it as an opaque CORS failure rather than as an error |
+
+**Also carries `details.error_id`**, a 32-character hex UUID that appears verbatim in the server
+log next to the traceback. Show it to the user so they can quote it; log it if you have your own
+telemetry. Do **not** branch on it, and do not treat the message as diagnostic — it is a constant.
+The exception itself is never rendered: on an unhandled error nobody has vetted what the string
+contains, and `POST /organizations` is public.
+
 **405 `method_not_allowed`** — message `Method Not Allowed`, `details: {}`.
 
 Produced when the path exists but the method does not, e.g. `POST /api/v1/notifications`,
@@ -520,67 +535,53 @@ list the permitted methods; this API does not. Do not build anything that reads 
 
 #### 3.1.4 Responses that are NOT in the envelope
 
-**This is the most important correction in this document.** The envelope is not universal, and a
-client that assumes it is will throw a JSON parse error at the worst possible moment.
+**This list is now short — it was the most important correction in the previous revision.** As of
+Sprint 4 the envelope covers everything the application answers, including a `500`. Two responses
+are still outside it, and both are written before or above the application.
 
 | Status | Content-Type | Body | Cause |
 |---|---|---|---|
-| **500** | `text/plain` | `Internal Server Error` | Any unhandled server-side exception — **including a missing `Content-Type`, see below** |
-| **400** | `text/plain` | `Disallowed CORS origin` | CORS preflight from an origin not in the allow-list |
+| **400** | `text/plain` | `Disallowed CORS origin` | CORS preflight from an origin not in the allow-list. Written by the CORS layer, which runs before any handler |
 | **307** | — | empty, `Location` header only | A trailing slash, e.g. `GET /api/v1/users/`. Not enveloped and **not authenticated** |
 | **405** | ✅ enveloped | `Method Not Allowed` | Raised by the router **before** auth — so it pre-empts `401`, see §3.1.6 |
 
-Only three exception handlers are registered — for application errors, request validation, and
-routing errors. **Nothing catches a generic exception**, so any unexpected failure is answered
-by the server's default plain-text 500 and never reaches the envelope.
+Four exception handlers are registered — application errors, request validation, routing errors,
+and a catch-all — and behind them sits `ErrorEnvelopeMiddleware`, which answers anything that
+escapes all four. The middleware is deliberately mounted *inside* the CORS layer, so an enveloped
+`500` still carries `access-control-allow-origin`; an error a browser cannot read is not much
+better than no error at all, which is the lesson of D-13 below.
 
-> **On the sign-up form, always send `Content-Type: application/json`.**
+> **Always send `Content-Type: application/json` on requests with a body.**
 >
-> `POST /api/v1/organizations` with a non-empty body and any other content type — `text/plain`,
-> `application/x-www-form-urlencoded`, or **no `Content-Type` header at all** — returns
-> **`500 Internal Server Error` as plain text**, not a `422` and not a `415`.
+> This is no longer a workaround for a crash — omitting it now gives a clean
+> `422 validation_error` with `errors[0].type == "model_attributes_type"` — but the body still
+> will not be parsed as JSON. FastAPI leaves it as raw bytes on purpose: a browser can send a
+> body with no `Content-Type` and skip the CORS preflight, so requiring the header is CSRF
+> hardening. Send it and the request works; omit it and you get a 422 no matter how valid the
+> JSON is.
 >
-> Verified against production on 30 July 2026: all three variants return
-> `500` / `text/plain` / `Internal Server Error`.
->
-> The cause is a bug in the validation handler, not in your request: the framework leaves the
-> body as raw bytes, the validation error carries those bytes, and serialising them to JSON
-> throws inside the error handler itself. The response also carries **no
-> `access-control-allow-origin` header**, so in a browser it surfaces as an opaque CORS failure
-> rather than as a 500 — which makes it maximally confusing to debug from the frontend.
->
-> **Scope:** only `POST /api/v1/organizations` is affected, because it is the only public
-> endpoint that takes a body. On every authenticated endpoint the `401`/`403` fires *before* the
-> body is decoded, so a logged-in user cannot trigger it. That still makes it the registration
-> screen — the first thing a new user ever touches, and the one most likely to be hand-rolled
-> outside the shared `api()` helper. Tracked as D-13 in §7.2.
+> **What changed (D-13, D-14):** the same request used to answer **plain-text `500`**, because
+> the validation handler crashed while serialising its own response — the raw body bytes in
+> `errors[0].input` are not JSON-serialisable. `NaN`/`Infinity` literals crashed it the same way
+> (`json.loads` accepts them; the JSON writer refuses to write them back), as did a non-UTF-8
+> binary body. All three are now `422`. Verified against production on 30 July 2026 in the
+> broken state; the fix ships in Sprint 4.
 
-A `NaN` or `Infinity` literal in the body of that same endpoint triggers the same handler crash,
-for the same reason — a `500` instead of a `422` (D-14, also verified on production).
-
-By contrast, **malformed JSON *with* the right `Content-Type` behaves correctly**: a proper `422`
-envelope, verified live as
+Malformed JSON *with* the right `Content-Type` behaved correctly all along and still does:
 `{"error":{"code":"validation_error","message":"Request validation failed.","details":{"errors":[{"type":"json_invalid","loc":["body",5],…}]}}}`.
 Note the integer in `loc` — see §3.1.5.
 
-**Supabase Admin failures are no longer among these.** They used to be the most reachable 500 in
-the API — a bad service-role key, a wrong project URL, the GoTrue rate limit, unconfigured SMTP
-or a network timeout during `POST /organizations` or `POST /users` all produced a plain-text
-`500`. They are now enveloped `502`/`503` with a reason slug (§3.1.3). Fixed in Sprint 4; see
-D-1 in §7.2.
-
-The one that remains: `DELETE /categories/{id}` for a category referenced only by **closed**
-incidents (§4.3, D-2). It is a real defect and until it is fixed the frontend must survive it.
+**Supabase Admin failures** used to be the most reachable 500 in the API — a bad service-role key,
+a wrong project URL, the GoTrue rate limit, unconfigured SMTP or a network timeout during
+`POST /organizations` or `POST /users`. They became enveloped `502`/`503` with a reason slug
+(§3.1.3) in Sprint 4, and `DELETE /categories/{id}` on a category referenced only by closed
+incidents — the last documented plain-text 500 — is now a `409 category_in_use` (§4.3, D-2).
 
 **What to do:**
 
 ```js
-// Guard envelope parsing. Never assume a body is JSON.
+// Every error this API produces is now an envelope; the try/catch is for the CORS 400.
 async function parseError(res) {
-  // 502/503 ARE enveloped and carry a message worth showing — only 500 is plain text.
-  if (res.status >= 500 && res.status !== 502 && res.status !== 503) {
-    return { code: 'internal_error', message: 'Server error. Try again.' }
-  }
   try {
     const body = await res.json()
     return body.error ?? { code: 'unknown', message: 'Unexpected response' }
@@ -590,16 +591,19 @@ async function parseError(res) {
 }
 ```
 
-Also build URLs **without** trailing slashes — `/api/v1/users`, not `/api/v1/users/` — or you
-will collect a redirect on every list call, which `fetch` follows but which turns a `POST` into
-a mess. The redirect is issued by the router before authentication, so it is neither enveloped
-nor gated.
+On a `500` the message is a constant and tells the user nothing — show it, and show
+`details.error_id` alongside it so a support report can be matched to a server log line.
 
-**And the redirect downgrades the scheme.** Verified live: `GET https://…/api/v1/me/` answers
-`307` with `Location: http://flowdesk-backend.fly.dev/api/v1/me` — plain `http`, because the app
-rebuilds an absolute URL without honouring the proxy's forwarded-proto header. A browser on an
-HTTPS page will refuse to follow that as mixed content, so a stray trailing slash fails in the
-browser while working fine in curl. Tracked as D-15.
+Also build URLs **without** trailing slashes — `/api/v1/users`, not `/api/v1/users/`. The
+redirect no longer breaks (see below) but it still costs a round trip, and it is issued by the
+router before authentication, so it is neither enveloped nor gated.
+
+**The redirect no longer downgrades the scheme.** It used to: `GET https://…/api/v1/me/` answered
+`307` with `Location: http://flowdesk-backend.fly.dev/api/v1/me`, because Fly terminates TLS and
+the app rebuilt an absolute URL from a scope that said `http`. A browser on an HTTPS page refused
+to follow that as mixed content, so a stray trailing slash failed in the browser while working
+fine in curl. The app now honours the proxy's forwarded-proto header and the `Location` preserves
+`https` (D-15, fixed in Sprint 4).
 
 One more routing quirk: **`HEAD /health` returns `405`**, because a `GET` route here does not
 implicitly accept `HEAD`. If your uptime monitor probes with `HEAD`, point it at `GET`.
@@ -619,6 +623,17 @@ deleted in Sprint 3 and nothing raises it. Remove any 501 handling you still hav
 
 So: `if (details.reason) { … } else if (details.errors) { … }`. Never assume `reason` exists on a
 422.
+
+**`input` is not always the value you sent.** Sprint 4 made the error list serialisable (D-13,
+D-14), and two of those rewrites are visible:
+
+- a non-finite number arrives as the **string** `"nan"`, `"inf"` or `"-inf"`, because JSON cannot
+  carry the value itself. Finite numbers are untouched;
+- when the body was not parsed as JSON — no `Content-Type`, or the wrong one — `input` is the raw
+  body decoded as text, and anything over 512 characters is truncated with a `…[truncated]`
+  suffix. An oversized object or array is rendered to JSON first, so it arrives as a string.
+
+Do not `Number(input)` blindly, and do not assume `input` round-trips what you sent.
 
 **`loc` is not always `["body", "<field>"]`.** Do not read `loc[1]` as a field name
 unconditionally:
@@ -846,7 +861,14 @@ set-password link (§2.6). The admin cannot log in until they follow it.
    retry. But if the Supabase call itself **times out**, the auth user may well have been
    created (and the invite email sent) with no response to act on — nothing is rolled back, and
    that email is then permanently stuck on `A user with this email is already registered.`
-   Recovery is manual, via the Supabase dashboard. Tracked in §7.2.
+   Recovery on **this** endpoint stays manual, via the Supabase dashboard, and that is a
+   deliberate choice rather than an omission: registration is public, and the `503` also covers
+   GoTrue's invite rate limit, which costs two requests to trigger. Adopting an existing auth
+   account here would let a stranger burn the limit and then bind somebody else's address to an
+   organisation of their choosing, with the already-sent invite as the way in. `POST /users`,
+   which is authenticated, does recover automatically (§4.4). Since Sprint 4 the attempted
+   address is written to the server log on every timeout, so an operator can find it without
+   guessing. Tracked as D-4 in §7.2, with the self-service question open in §7.3.
 5. **Unknown body fields are silently ignored**, not rejected.
 
 ### 4.3 Categories
@@ -906,14 +928,16 @@ Unknown keys are silently dropped. `409` on a duplicate name, `404` if out of sc
 
 This is a **hard delete**, not an archive — there is no `is_active` flag on categories.
 
-`409 This category is used by open incidents and cannot be deleted.` when at least one
-referencing incident is **not closed** (i.e. `open` or `in_review`). The blocking incident ids
-and count are not returned, so you cannot deep-link the admin to the offenders.
+`409 This category is referenced by existing incidents and cannot be deleted.`, with
+`details.reason = "category_in_use"`, when at least one incident references it — **of any
+status, closed included**. The blocking incident ids and count are not returned, so you cannot
+deep-link the admin to the offenders.
 
-> **Known defect (§7.2):** the guard only checks non-closed incidents. A category referenced
-> **only by closed incidents** passes the guard and then violates a database foreign key,
-> producing a non-enveloped **`500`**. Until it is fixed, treat a `500` on this endpoint as
-> "category still in use" in your UI rather than as an outage.
+> **Changed in Sprint 4 (D-2).** The guard used to exclude closed incidents, so a category
+> referenced only by closed ones passed it and then violated a foreign key, producing a
+> non-enveloped `500`. Both the message and the rule changed: closed incidents block deletion
+> too, because the foreign key has no `ON DELETE` action and a closed incident still needs its
+> category to render. If you special-cased a `500` here as "still in use", remove that.
 
 ### 4.4 Users
 
@@ -967,8 +991,14 @@ the wrong organisation — put it in the query string.
 Emails are unique per tenant, compared **case-insensitively** — so the same person can exist in
 two different tenants, but not twice in one.
 
-Same partial-compensation caveat as `POST /organizations`: a failure after the auth user is
-created usually cleans up, but a timeout can leave an orphan (§7.2).
+**A timed-out invite now recovers itself.** If the Supabase call times out, the auth account may
+already exist; the backend looks it up and provisions against it, so the retry succeeds instead
+of dead-ending on `A user with this email already exists.` It adopts the account **only** when no
+FlowDesk user points at it — an auth id that already backs a user is that user, and re-pointing it
+would hand one person's identity to another. When the lookup finds nothing, finds a claimed
+account, or fails in turn, you get the original `503 identity_provider_unavailable` (D-4). Note
+the asymmetry with `POST /organizations`, which is public and deliberately does not do this
+(§4.2 item 4).
 
 #### `GET /api/v1/users/{user_id}`
 
@@ -997,14 +1027,24 @@ fires *after* the scope check, so a `tenant_admin` patching an out-of-tenant use
 
 Both are idempotent: deactivating an inactive user returns `200` and the same body.
 
-> **There is no self-targeting guard.** An admin can deactivate **their own account**, and the
-> effect is immediate: their next request — including the request that would reactivate
-> themselves — returns `403 account_deactivated`. They are locked out and need another admin, or
-> direct database access, to recover.
->
-> Please put a confirmation step in front of this in the UI. A tenant with exactly one admin who
-> deactivates themselves has bricked their organisation. Tracked in §7.2 as a backend fix worth
-> making, but the UI guard is cheaper and should exist regardless.
+Two guards, added in Sprint 4 (D-3):
+
+| HTTP | `details.reason` | Trigger |
+|---|---|---|
+| 403 | `self_deactivation` | The target is the caller. Deactivation takes effect on the very next request, so this used to be a one-way door — including for the request that would undo it |
+| 409 | `last_tenant_admin` | The target is the tenant's only active `tenant_admin`. Also fires on `PATCH /users/{id}` demoting them, or promoting them to `system_admin` — both empty the tenant's admin pool |
+
+Both are gated on the **transition**, not the target state, so idempotent re-deactivation still
+returns `200` and **activation is never blocked** — activation is the recovery path.
+
+`last_tenant_admin` is counted within the *target's* tenant, so a `system_admin` acting
+cross-tenant gets it too.
+
+A confirmation step in the UI is still worth having: a `403` after the click is a worse
+experience than a dialog before it.
+
+Deactivation takes effect on the user's very next request even though their JWT is still valid
+(§2.1).
 
 Deactivation takes effect on the user's very next request even though their JWT is still valid
 (§2.1).
@@ -1555,11 +1595,13 @@ notifications and analytics; an unauthenticated `GET /me` returns exactly
 
 **Before you ship, make sure you have:**
 
-- [ ] **`Content-Type: application/json` on the registration request** — omitting it is a
-      plain-text `500` that looks like a CORS error (§3.1.4, D-13). Set it everywhere anyway; the
-      `api()` helper in §2.4 already does.
-- [ ] An error parser that **tolerates a non-JSON body** on `5xx` (§3.1.4). This is the one that
-      will bite you in a demo.
+- [ ] **`Content-Type: application/json` on the registration request** — omitting it is now a
+      clean `422` rather than a plain-text `500`, but the body still will not be parsed
+      (§3.1.4). Set it everywhere; the `api()` helper in §2.4 already does.
+- [ ] An error parser that **tolerates a non-JSON body**, now needed only for the CORS `400`
+      (§3.1.4). Every application error, `500` included, is an envelope.
+- [ ] `details.error_id` surfaced on a `500` so a user can quote it in a support report
+      (§3.1.3).
 - [ ] `401` handling that branches on `details.reason`, not on the status — and that does **not**
       force a logout on `invalid_token` (§3.1.3).
 - [ ] URLs built **without** trailing slashes (§3.1.4).
@@ -1584,8 +1626,11 @@ the reason this document exists as a rewrite rather than a third delta.
 1. **`verification_failed` is not the JWKS-outage slug** — `invalid_token` is. v1.0 said
    otherwise and the advice attached to it would log every user out during a Supabase incident.
    See the warning in §3.1.3.
-2. **The error envelope is not universal.** v1.0 listed `500 internal_error` as an envelope row;
-   there is no such envelope. `500` is plain text, and so is a CORS rejection (`400`). §3.1.4.
+2. **The error envelope is not universal** — it was not, and now it is. v1.0 listed
+   `500 internal_error` as an envelope row; v2.0 corrected that to "there is no such envelope,
+   `500` is plain text". As of Sprint 4 **v1.0 was right after all**: the catch-all landed (D-1),
+   and `500` renders as `internal_error` with `details.reason` and `details.error_id`. Only the
+   CORS rejection (`400`) is still plain text. §3.1.4.
 3. **`501 not_implemented` is dead.** v1.0 documented it for the reserved endpoints; those are
    deleted and nothing raises it. Collection-level POST on the three former stubs is now `405`.
 4. **`403 insufficient_role` beats `422`**, not the other way around, because role checks run as
@@ -1593,27 +1638,29 @@ the reason this document exists as a rewrite rather than a third delta.
 
 ### 7.2 Known defects
 
-Found while writing this contract. All are real, none is a blocker for the demo, and each has a
-one-line-to-one-file fix. Listed here rather than quietly omitted, because a contract that hides
-them is worse than one that names them. These double as Defect Register entries for Assessment 3.
+Found while writing this contract. Listed here rather than quietly omitted, because a contract
+that hides them is worse than one that names them. These double as Defect Register entries for
+Assessment 3. Sprint 4 closed six of them outright and a seventh in part; the `Status` column
+says which, and each fixed row keeps its original description so the register still reads as a
+history rather than a list of things that were never wrong.
 
-| # | Severity | Defect |
-|---|---|---|
-| D-13 | **High** | **`POST /organizations` with a body but no (or a wrong) `Content-Type` returns a plain-text `500`**, not `422` or `415` — the validation handler cannot serialise the raw bytes it is handed. Confined to that one endpoint because it is the only public one with a body, but that is the registration screen. Surfaces in a browser as an opaque CORS error, since the response carries no `allow-origin` header. **Verified on production.** §3.1.4 |
-| D-14 | Medium | **A `NaN`/`Infinity` literal in the `POST /organizations` body** crashes the same handler → plain-text `500` instead of `422`. **Verified on production.** §3.1.4 |
-| D-1 | High | **No generic exception handler**, so any unexpected failure is a plain-text `500` outside the envelope. This is the root cause of D-13, D-14 and D-2. **Partly fixed in Sprint 4:** the Supabase Admin path — by far the most reachable, and hit in production by GoTrue's `429 over_email_send_rate_limit` — now raises typed `AppError`s and answers an enveloped `502`/`503` (§3.1.3). `SupabaseAdminError` inheriting from `Exception` was what put it outside the handler. The generic handler is still missing, so D-13, D-14 and D-2 stand. §3.1.4 |
-| D-2 | High | **`DELETE /categories/{id}` returns `500`** for a category referenced only by *closed* incidents — the guard checks non-closed only, then a foreign key fails. §4.3 |
-| D-3 | Medium | **Self-deactivation locks an admin out permanently.** No self-targeting guard on `/deactivate`; a sole admin can brick their tenant. §4.4 |
-| D-4 | Medium | **Orphaned Supabase auth users on timeout.** Compensation covers database failures but not a timed-out invite call, permanently trapping that email on a `409`. §4.2, §4.4 |
-| D-5 | Medium | **Six errors ship with `details: {}`** (`User not found.`, `Category not found.`, both incident 404s, the category and email `409`s, both organisation `409`s), so a client must match on message text. Backfilling `details.reason` is additive and safe. §3.1.3 |
-| D-6 | Low | **`system_admin` cannot write categories or perform workflow actions** (`403`). Probably unintended, since it is cross-tenant everywhere else. §2.9 |
-| D-7 | Low | **Cross-tenant lists are unlabelled** — `UserOut` and `IncidentOut` carry no `tenant_id`, so a System Admin's all-tenant list cannot be grouped by organisation. §4.4, §4.5 |
-| D-15 | Medium | **The trailing-slash `307` redirects to `http://`, not `https://`** — the app does not honour the proxy's forwarded-proto header, so a browser blocks the redirect as mixed content while curl follows it happily. **Verified on production.** §3.1.4 |
-| D-8 | Low | **`405` drops the `Allow` header.** §3.1.3 |
-| D-9 | Low | **`/docs` and `/openapi.json` are public in production** — `APP_ENV` exists but is never read. §1.3 |
-| D-10 | Low | **No way to clear a category description** — `null` means "unchanged". §4.3 |
-| D-11 | Low | **A no-op reassign still notifies and audits.** §4.6 |
-| D-12 | Low | **`GET /me` can return a `401` with no reason slug** (`User tenant not found.`) — the only one in the API. §3.1.3 |
+| # | Severity | Status | Defect |
+|---|---|---|---|
+| D-13 | **High** | **Fixed** (Sprint 4) | **`POST /organizations` with a body but no (or a wrong) `Content-Type` returned a plain-text `500`**, not `422` or `415` — the validation handler could not serialise the raw body bytes it is handed in `errors[0].input`. Confined to that one endpoint because it is the only public one with a body, but that is the registration screen. Surfaced in a browser as an opaque CORS error, since the response carried no `allow-origin` header. **Verified on production.** Fixed by encoding the error list through `jsonable_encoder` with explicit `bytes`/`float` encoders; the CORS half is fixed by D-1's middleware sitting inside the CORS layer. A **binary** body was a third variant of the same defect, found while fixing it — `jsonable_encoder`'s own bytes encoder is a strict UTF-8 decode. §3.1.4 |
+| D-14 | Medium | **Fixed** (Sprint 4) | **A `NaN`/`Infinity` literal in the `POST /organizations` body** crashed the same handler → plain-text `500` instead of `422`. `json.loads` accepts the literals; `JSONResponse` dumps with `allow_nan=False`. **Verified on production.** Non-finite floats now render as the strings `"nan"`/`"inf"`/`"-inf"` (§3.1.5). §3.1.4 |
+| D-1 | High | **Fixed** (Sprint 4) | **No generic exception handler**, so any unexpected failure was a plain-text `500` outside the envelope. Root cause of D-13, D-14 and D-2. Fixed in two steps: the Supabase Admin path — by far the most reachable, and hit in production by GoTrue's `429 over_email_send_rate_limit` — was given typed `AppError`s answering an enveloped `502`/`503` (`SupabaseAdminError` inheriting from `Exception` was what put it outside the handler); then `ErrorEnvelopeMiddleware` plus an `Exception` handler closed the general case. The middleware is mounted **inside** CORS deliberately: a handler registered under `Exception` becomes Starlette's outermost node, so its `500` would carry no `allow-origin` and a browser would still see nothing. §3.1.4 |
+| D-2 | High | **Fixed** (Sprint 4) | **`DELETE /categories/{id}` returned `500`** for a category referenced only by *closed* incidents — the guard checked non-closed only, then the foreign key failed. Now a `409 category_in_use` for a reference of any status, with an `IntegrityError` branch closing the check-then-act race. §4.3 |
+| D-3 | Medium | **Fixed** (Sprint 4) | **Self-deactivation locked an admin out permanently**, and a sole admin could brick their tenant. Now `403 self_deactivation` and `409 last_tenant_admin`, the latter also covering the `PATCH` route that demotes or promotes the last admin away. §4.4 |
+| D-4 | Medium | **Partly fixed** (Sprint 4) | **Orphaned Supabase auth users on timeout.** Compensation covers database failures but not a timed-out invite call, permanently trapping that email on a `409`. Three changes: `get_user_by_email` now paginates (it read one 50-row page, so every recovery path silently no-opped past 50 auth users), the attempted address is logged on every unreachable call so an operator can find it, and the authenticated `POST /users` adopts a genuinely orphaned account on retry. **`POST /organizations` deliberately does not** — it is public, and the same `503` covers a cheap-to-trigger rate limit, so adoption there would be an account-squatting primitive. See §7.3. §4.2, §4.4 |
+| D-5 | Medium | Open | **Six errors shipped with `details: {}`** (`User not found.`, `Category not found.`, both incident 404s, the category and email `409`s, both organisation `409`s), so a client must match on message text. Backfilling `details.reason` is additive and safe. D-2's fix gave the category `409` the slug `category_in_use`, so **five** are left. §3.1.3 |
+| D-6 | Low | Open | **`system_admin` cannot write categories or perform workflow actions** (`403`). Probably unintended, since it is cross-tenant everywhere else. §2.9 |
+| D-7 | Low | Open | **Cross-tenant lists are unlabelled** — `UserOut` and `IncidentOut` carry no `tenant_id`, so a System Admin's all-tenant list cannot be grouped by organisation. §4.4, §4.5 |
+| D-15 | Medium | **Fixed** (Sprint 4) | **The trailing-slash `307` redirected to `http://`, not `https://`** — the app did not honour the proxy's forwarded-proto header, so a browser blocked the redirect as mixed content while curl followed it happily. **Verified on production.** The register called this "a one-line proxy-header setting", which would not have worked: uvicorn already mounts the middleware and `--proxy-headers` is its default; the problem was `forwarded-allow-ips`, which trusts only `127.0.0.1` while Fly Proxy arrives over 6PN. Fixed by mounting `ProxyHeadersMiddleware(trusted_hosts="*")` in the app, where it is also testable. §3.1.4 |
+| D-8 | Low | Open | **`405` drops the `Allow` header.** §3.1.3 |
+| D-9 | Low | Open | **`/docs` and `/openapi.json` are public in production** — `APP_ENV` exists but is never read. §1.3 |
+| D-10 | Low | Open | **No way to clear a category description** — `null` means "unchanged". §4.3 |
+| D-11 | Low | Open | **A no-op reassign still notifies and audits.** §4.6 |
+| D-12 | Low | Open | **`GET /me` can return a `401` with no reason slug** (`User tenant not found.`) — the only one in the API. §3.1.3 |
 
 ### 7.3 Open questions
 
@@ -1629,12 +1676,21 @@ them is worse than one that names them. These double as Defect Register entries 
 4. **Reassignment in the user-visible timeline** — currently audit-log only; adding it needs a
    schema change.
 5. **Should `system_admin` be a strict superset of `tenant_admin`?** (D-6.)
-6. **Priority for the defect register above** — my proposal for Sprint 4 is **D-1** (a generic
-   exception handler, which also fixes D-13 and D-14), **D-2** (the category-delete `500`),
-   **D-15** (the `https` redirect, a one-line proxy-header setting) and **D-3** (the
-   self-deactivation lockout). Those four are the ones a tester or a demo will actually hit. The
-   rest as capacity allows; **D-5** (backfilling `details.reason`) is the largest but is purely
-   additive and safe to do incrementally.
+6. **Priority for the defect register above** — **shipped in Sprint 4.** The proposal was D-1
+   (the generic handler, which also fixes D-13 and D-14), D-2, D-15 and D-3; all four landed,
+   plus D-4 in part. What remains is **D-5** (backfilling `details.reason` on the five errors
+   that still ship `details: {}`), **D-6** and **D-7** — all three purely additive, none of
+   them reachable by a tester or a demo. No further defect work is scheduled unless testing
+   Friday turns something up.
+7. **Should a public registration recover itself after a timed-out invite?** New, and the one
+   decision D-4 could not make on the backend's own authority. Today `POST /organizations`
+   answers `503` and the stranded email is cleared by hand; the authenticated `POST /users`
+   adopts the orphaned auth account on retry. The asymmetry is deliberate — see §4.2 — because
+   the same `503` also covers GoTrue's invite rate limit, which is cheap for a stranger to
+   trigger on purpose. If self-service recovery is wanted on the public endpoint, the gate must
+   be "this account has never been confirmed and has never signed in", not "no FlowDesk user
+   points at it"; that needs GoTrue's `email_confirmed_at`/`last_sign_in_at` verified against
+   the live project first. Product call, not a backend one.
 
 **For Brad (contract confirmations):**
 
@@ -1646,14 +1702,21 @@ them is worse than one that names them. These double as Defect Register entries 
 5. **No data is a `200`, not a `404`** — for both analytics endpoints.
 6. **Do you need a "clear description" on categories?** (D-10.)
 7. **Do you need `tenant_id` on `UserOut`/`IncidentOut`** for the System Admin views? (D-7.)
+8. **Two Sprint 4 changes touch your code, both simplifications.** (a) `500` is now in the
+   envelope, so `parseError` no longer needs its `status >= 500` bail-out — every response with
+   a body parses the same way, and `details.error_id` is what to show the user and quote in a
+   ticket (§3.1.4). (b) `details.errors[].input` can now be a **string** where it used to be
+   the submitted value: the raw body when the request had no usable `Content-Type`, or
+   `"nan"`/`"inf"`/`"-inf"` for a non-finite number, truncated at 512 characters either way.
+   Don't `Number(input)` without a guard (§3.1.5).
 
 ### 7.4 Sign-off
 
 | | |
 |---|---|
-| Backend (Ivan) | Contract matches the deployed code as of 30 July 2026 ✅ |
-| Frontend (Brad) | ☐ Confirm §7.3 items 1–7 |
-| Product (Fady) | ☐ Confirm §7.3 items 1–6; approve making this file canonical |
+| Backend (Ivan) | Contract matches the deployed code as of 7 August 2026 ✅ (Sprint 4: D-1, D-13, D-14, D-2, D-15, D-3 fixed; D-4 in part) |
+| Frontend (Brad) | ☐ Confirm §7.3 items 1–8 — item 8 is the only one that changes your code |
+| Product (Fady) | ☐ Confirm §7.3 items 1–7; approve making this file canonical |
 
 Any change to the API is versioned in this file and reflected automatically in
 `/openapi.json`.
