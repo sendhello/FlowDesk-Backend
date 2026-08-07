@@ -45,6 +45,12 @@ logger = get_logger(__name__)
 
 _REJECTED_MESSAGE = "The identity provider rejected the request."
 
+#: GoTrue's admin user list is paginated; its default page is 50.
+_USERS_PER_PAGE = 200
+#: Bound on a single lookup. 10 000 auth users is far beyond anything this project will
+#: hold, so hitting it means something is wrong, not that the answer is on page 51.
+_MAX_USER_PAGES = 50
+
 
 class SupabaseAdminError(UpstreamServiceError):
     """A Supabase Admin API call failed. Renders as 502 in the shared envelope."""
@@ -100,9 +106,19 @@ def _fail(operation: str, response: httpx.Response) -> NoReturn:
     )
 
 
-def _unreachable(operation: str, exc: httpx.HTTPError) -> NoReturn:
-    """A timeout or connection failure is exactly as transient as a 429."""
-    logger.error("supabase_admin %s unreachable: %r", operation, exc)
+def _unreachable(
+    operation: str, exc: httpx.HTTPError, *, email: str | None = None
+) -> NoReturn:
+    """A timeout or connection failure is exactly as transient as a 429 — to the caller.
+
+    Server-side it is not: a timed-out `invite_user` is the one failure whose outcome is
+    unknown, because GoTrue may well have created the account and sent the invite before
+    the connection dropped. The email is logged — never rendered — because this line is
+    then the only record of which address needs reconciling in the dashboard (D-4).
+    """
+    logger.error(
+        "supabase_admin %s unreachable: %r email=%s", operation, exc, email or "-"
+    )
     raise SupabaseUnavailableError(
         details={"reason": "identity_provider_unavailable", "operation": operation},
     ) from exc
@@ -144,7 +160,7 @@ class SupabaseAdminClient:
                     url, json=payload, params=params, headers=self._headers()
                 )
         except httpx.HTTPError as exc:
-            _unreachable("invite_user", exc)
+            _unreachable("invite_user", exc, email=email)
         if resp.status_code in (409, 422) and _looks_like_exists(resp.text):
             raise SupabaseUserExistsError(email)
         if resp.status_code >= 400:
@@ -152,18 +168,40 @@ class SupabaseAdminClient:
         return uuid.UUID(resp.json()["id"])
 
     async def get_user_by_email(self, email: str) -> uuid.UUID | None:
-        """Best-effort lookup of an auth user id by email (for idempotent recovery)."""
+        """Look up an auth user id by email. Paginated (for idempotent recovery).
+
+        This used to be a single unpaginated GET, so it read GoTrue's default first page —
+        50 rows — and answered "no such user" for everyone newer. Every recovery path that
+        depends on it therefore became a silent no-op exactly as the project grew, which is
+        why `scripts/seed_demo.py` refuses to run past 45 auth users. That seeder has
+        walked the pages properly since Sprint 3; this is the same loop, bounded so a
+        lookup cannot hammer GoTrue indefinitely.
+        """
         url = f"{self._base}/auth/v1/admin/users"
-        try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                resp = await client.get(url, headers=self._headers())
-        except httpx.HTTPError as exc:
-            _unreachable("get_user_by_email", exc)
-        if resp.status_code >= 400:
-            _fail("get_user_by_email", resp)
-        for user in resp.json().get("users", []):
-            if user.get("email", "").lower() == email.lower():
-                return uuid.UUID(user["id"])
+        target = email.lower()
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            for page in range(1, _MAX_USER_PAGES + 1):
+                try:
+                    resp = await client.get(
+                        url,
+                        params={"page": page, "per_page": _USERS_PER_PAGE},
+                        headers=self._headers(),
+                    )
+                except httpx.HTTPError as exc:
+                    _unreachable("get_user_by_email", exc, email=email)
+                if resp.status_code >= 400:
+                    _fail("get_user_by_email", resp)
+                batch = resp.json().get("users", [])
+                for user in batch:
+                    # `or ""` rather than a .get default: GoTrue returns the key with a
+                    # null value for phone-only accounts, and None has no .lower().
+                    if (user.get("email") or "").lower() == target:
+                        return uuid.UUID(user["id"])
+                if len(batch) < _USERS_PER_PAGE:
+                    return None
+        logger.warning(
+            "supabase_admin get_user_by_email stopped after %s pages", _MAX_USER_PAGES
+        )
         return None
 
     async def delete_user(self, user_id: uuid.UUID) -> None:

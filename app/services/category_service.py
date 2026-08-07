@@ -10,7 +10,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError
 from app.models.category import Category
-from app.models.enums import IncidentStatus
 from app.models.incident import Incident
 
 
@@ -72,22 +71,36 @@ async def update_category(
     return category
 
 
+_IN_USE_MESSAGE = "This category is referenced by existing incidents and cannot be deleted."
+
+
+def _in_use() -> ConflictError:
+    return ConflictError(_IN_USE_MESSAGE, details={"reason": "category_in_use"})
+
+
 async def delete_category(
     db: AsyncSession, *, tenant_id: uuid.UUID, category_id: uuid.UUID
 ) -> None:
     category = await get_category(db, tenant_id=tenant_id, category_id=category_id)
-    # UC-04 A2: block deletion while non-closed incidents reference the category.
+    # UC-04 A2: block deletion while ANY incident references the category.
+    #
+    # The guard used to exclude closed incidents, which reads as a fair interpretation of
+    # "open incidents" — but `incidents.category_id` is a plain foreign key with no ON
+    # DELETE action, so a closed incident blocks the DELETE exactly as hard as an open one.
+    # The category passed the guard and then died on the constraint, uncaught: a plain-text
+    # 500 (D-2). This is a hard delete of a label, not of history, and a closed incident
+    # still needs its category to render.
     blocking = await db.scalar(
-        select(Incident.id)
-        .where(
-            Incident.category_id == category_id,
-            Incident.status != IncidentStatus.closed,
-        )
-        .limit(1)
+        select(Incident.id).where(Incident.category_id == category_id).limit(1)
     )
     if blocking is not None:
-        raise ConflictError(
-            "This category is used by open incidents and cannot be deleted."
-        )
+        raise _in_use()
     await db.delete(category)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # An incident filed between the SELECT and the COMMIT. Same answer either way, so
+        # the caller cannot tell the race from the ordinary case — which is the point.
+        # Mirrors create_category and update_category above.
+        await db.rollback()
+        raise _in_use()
