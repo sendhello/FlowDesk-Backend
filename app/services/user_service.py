@@ -89,7 +89,7 @@ async def get_user(
 ) -> User:
     user = await db.get(User, user_id)
     if user is None or _out_of_scope(scope, user):
-        raise NotFoundError("User not found.")
+        raise NotFoundError("User not found.", details={"reason": "user_not_found"})
     return user
 
 
@@ -159,7 +159,8 @@ async def invite_user(
     # UC-03 E1: email unique within the tenant.
     if await get_by_email_in_tenant(db, tenant_id, email) is not None:
         raise ConflictError(
-            "A user with this email already exists in your organisation."
+            "A user with this email already exists in your organisation.",
+            details={"reason": "user_email_taken"},
         )
 
     created_auth = True
@@ -168,7 +169,10 @@ async def invite_user(
     except SupabaseUserExistsError:
         existing_id = await admin.get_user_by_email(email)
         if existing_id is None or await db.get(User, existing_id) is not None:
-            raise ConflictError("A user with this email already exists.")
+            raise ConflictError(
+                "A user with this email already exists.",
+                details={"reason": "email_registered"},
+            )
         auth_id, created_auth = existing_id, False
     except SupabaseUnavailableError as exc:
         # The invite may have landed before the connection dropped (D-4). `created_auth`
@@ -195,7 +199,8 @@ async def invite_user(
         if created_auth:
             await delete_user_best_effort(admin, auth_id, action="user_invite")
         raise ConflictError(
-            "A user with this email already exists in your organisation."
+            "A user with this email already exists in your organisation.",
+            details={"reason": "user_email_taken"},
         )
     except Exception:
         await db.rollback()

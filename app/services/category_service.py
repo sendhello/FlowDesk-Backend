@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import ConflictError, NotFoundError
 from app.models.category import Category
 from app.models.incident import Incident
+from app.schemas.common import Unset
 
 
 async def list_categories(
@@ -31,7 +32,9 @@ async def get_category(
 ) -> Category:
     category = await db.get(Category, category_id)
     if category is None or category.tenant_id != tenant_id:
-        raise NotFoundError("Category not found.")
+        raise NotFoundError(
+            "Category not found.", details={"reason": "category_not_found"}
+        )
     return category
 
 
@@ -44,7 +47,10 @@ async def create_category(
         await db.commit()
     except IntegrityError:
         await db.rollback()
-        raise ConflictError("A category with this name already exists.")
+        raise ConflictError(
+            "A category with this name already exists.",
+            details={"reason": "category_name_taken"},
+        )
     await db.refresh(category)
     return category
 
@@ -55,18 +61,27 @@ async def update_category(
     tenant_id: uuid.UUID,
     category_id: uuid.UUID,
     name: str | None,
-    description: str | None,
+    description: str | None | Unset,
 ) -> Category:
+    """Partial update. `description` distinguishes absent from null; `name` does not.
+
+    That asymmetry is deliberate: `categories.name` is NOT NULL, so "set the name to
+    nothing" has no meaning to express, while a description is nullable and clearing one
+    was simply impossible before (D-10).
+    """
     category = await get_category(db, tenant_id=tenant_id, category_id=category_id)
     if name is not None:
         category.name = name
-    if description is not None:
+    if not isinstance(description, Unset):
         category.description = description
     try:
         await db.commit()
     except IntegrityError:
         await db.rollback()
-        raise ConflictError("A category with this name already exists.")
+        raise ConflictError(
+            "A category with this name already exists.",
+            details={"reason": "category_name_taken"},
+        )
     await db.refresh(category)
     return category
 

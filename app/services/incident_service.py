@@ -179,7 +179,9 @@ async def _load(db: AsyncSession, *, incident_id: uuid.UUID, options: tuple) -> 
         .execution_options(populate_existing=True)
     )
     if incident is None:
-        raise NotFoundError("Incident not found.")
+        raise NotFoundError(
+            "Incident not found.", details={"reason": "incident_not_found"}
+        )
     return incident
 
 
@@ -204,5 +206,11 @@ async def get_incident(
         .execution_options(populate_existing=True)  # see _load
     )
     if incident is None:
-        raise NotFoundError("Incident not found or you do not have permission to view it.")
+        # Same slug as the internal re-read above, deliberately. The two messages differ
+        # and the contract used to make a client handle both strings; one slug is the
+        # whole point of D-5.
+        raise NotFoundError(
+            "Incident not found or you do not have permission to view it.",
+            details={"reason": "incident_not_found"},
+        )
     return incident

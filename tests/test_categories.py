@@ -115,3 +115,63 @@ async def test_a_refused_delete_leaves_the_category_intact(client, db):
     still_there = await client.get(f"/api/v1/categories/{category.id}")
     assert still_there.status_code == 200, still_there.text
     assert still_there.json()["name"] == "Network"
+
+
+# ---- Clearing a description (D-10) ----------------------------------------------
+
+
+async def test_description_can_be_cleared(client, db):
+    """D-10. `null` meant "leave this alone", so once a category had a description there
+    was no request that could remove it — the field was write-once by accident.
+
+    JSON has one null and PATCH needs two meanings for it; absence now carries the first
+    (see `app.schemas.common.patched`) and null is free to carry the second.
+    """
+    tenant = await seed_tenant(db, "Acme")
+    admin = await seed_user(db, tenant, Role.tenant_admin)
+    category = await seed_category(db, tenant, name="Network")
+    category.description = "Switches, cabling, Wi-Fi."
+    await db.commit()
+    login_as(admin)
+
+    resp = await client.patch(
+        f"/api/v1/categories/{category.id}", json={"description": None}
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["description"] is None
+
+
+async def test_omitting_the_description_leaves_it_alone(client, db):
+    """The other half of the pair. Renaming a category must not silently wipe its
+    description, which is exactly what a naive fix for D-10 would do."""
+    tenant = await seed_tenant(db, "Acme")
+    admin = await seed_user(db, tenant, Role.tenant_admin)
+    category = await seed_category(db, tenant, name="Network")
+    category.description = "Switches, cabling, Wi-Fi."
+    await db.commit()
+    login_as(admin)
+
+    resp = await client.patch(
+        f"/api/v1/categories/{category.id}", json={"name": "Network & Wi-Fi"}
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["name"] == "Network & Wi-Fi"
+    assert resp.json()["description"] == "Switches, cabling, Wi-Fi."
+
+
+async def test_cleared_description_survives_a_reread(client, db):
+    """Proves the clear was committed, not just reflected in the response object."""
+    tenant = await seed_tenant(db, "Acme")
+    admin = await seed_user(db, tenant, Role.tenant_admin)
+    category = await seed_category(db, tenant, name="Network")
+    category.description = "Switches, cabling, Wi-Fi."
+    await db.commit()
+    login_as(admin)
+
+    await client.patch(f"/api/v1/categories/{category.id}", json={"description": None})
+    reread = await client.get(f"/api/v1/categories/{category.id}")
+
+    assert reread.status_code == 200, reread.text
+    assert reread.json()["description"] is None
