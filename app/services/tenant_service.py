@@ -37,7 +37,10 @@ async def register_organization(
         select(Tenant.id).where(func.lower(Tenant.name) == organization_name.lower())
     )
     if existing is not None:
-        raise ConflictError("An organisation with this name already exists.")
+        raise ConflictError(
+            "An organisation with this name already exists.",
+            details={"reason": "organization_name_taken"},
+        )
 
     # 2. Create the Supabase auth user (invite flow -> GoTrue emails a set-password link).
     try:
@@ -45,6 +48,7 @@ async def register_organization(
     except SupabaseUserExistsError:
         raise ConflictError(
             "A user with this email is already registered.",
+            details={"reason": "email_registered"},
         )
 
     # 3. Insert tenant + admin user in one transaction; compensate on failure.
@@ -65,7 +69,10 @@ async def register_organization(
     except IntegrityError:
         await db.rollback()
         await delete_user_best_effort(admin, auth_id, action="org_register")
-        raise ConflictError("An organisation with this name already exists.")
+        raise ConflictError(
+            "An organisation with this name already exists.",
+            details={"reason": "organization_name_taken"},
+        )
     except Exception:
         await db.rollback()
         await delete_user_best_effort(admin, auth_id, action="org_register")

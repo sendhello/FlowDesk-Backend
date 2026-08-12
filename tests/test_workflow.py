@@ -622,3 +622,71 @@ async def test_notification_hook_not_called_without_a_state_change(
     await client.post(fx.url, json=body)
 
     assert calls == []
+
+
+# ---- Reassignment that changes nothing (D-11) -----------------------------------
+
+
+async def test_reassign_to_the_current_assignee_is_a_no_op(client, db, monkeypatch):
+    """D-11. Assigning a reviewer to an incident they already hold changed no state but
+    still fired a notification, so a double-clicked button read as two hand-offs and the
+    reviewer was pinged about work that had not moved.
+
+    Answering 200 rather than 409 matches `POST /transitions`, which has treated "already
+    in that state" as a satisfied request since Sprint 2.
+    """
+    fx = await _setup(db, assign_reviewer=True)
+    calls: list[dict] = []
+
+    async def _spy(db_session, **kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(notification_service, "notify_incident_reassigned", _spy)
+
+    login_as(fx.admin)
+    response = await client.post(fx.assign_url, json={"assigned_to": str(fx.reviewer.id)})
+
+    assert response.status_code == 200
+    assert response.json()["assigned_to"]["id"] == str(fx.reviewer.id)
+    assert calls == []
+
+
+async def test_no_op_reassign_is_not_audit_logged(client, db, caplog):
+    """The audit trail answers "who has had this incident". A hand-off that never happened
+    does not belong in that answer."""
+    fx = await _setup(db, assign_reviewer=True)
+
+    login_as(fx.admin)
+    with caplog.at_level(logging.INFO):
+        await client.post(fx.assign_url, json={"assigned_to": str(fx.reviewer.id)})
+
+    assert not any("incident_reassign" in r.getMessage() for r in caplog.records)
+
+
+async def test_no_op_reassign_still_refuses_a_closed_incident(client, db):
+    """The early return sits AFTER both guards, so it cannot be used to slip past them."""
+    fx = await _setup(db, status=IncidentStatus.closed, assign_reviewer=True)
+
+    login_as(fx.admin)
+    response = await client.post(fx.assign_url, json={"assigned_to": str(fx.reviewer.id)})
+
+    assert response.status_code == 409
+    assert response.json()["error"]["details"]["reason"] == "incident_closed"
+
+
+async def test_reassigning_an_unassigned_incident_still_notifies(client, db, monkeypatch):
+    """Guards the boundary of the D-11 fix: `assigned_to` of NULL is not "already theirs",
+    and a first assignment must still reach the reviewer."""
+    fx = await _setup(db)
+    calls: list[dict] = []
+
+    async def _spy(db_session, **kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(notification_service, "notify_incident_reassigned", _spy)
+
+    login_as(fx.admin)
+    response = await client.post(fx.assign_url, json={"assigned_to": str(fx.reviewer.id)})
+
+    assert response.status_code == 200
+    assert len(calls) == 1

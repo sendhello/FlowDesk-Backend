@@ -1,9 +1,23 @@
-# FlowDesk API Contract — v2.1 (complete)
+# FlowDesk API Contract — v2.2 (complete)
 
 **For:** Bradley Van Elsen (Frontend Lead), Fady Tadros (Product Owner) · **From:** Ivan Bazhenov (Backend Lead)
-**Covers:** the entire shipped backend — Sprints 1–4 (UC-01 … UC-11, US-01 … US-16)
-**Status:** implemented and merged to `main`. Sprints 1–3 verified against the live deployment on 30 July 2026; the Sprint 4 defect fixes (§7.2) are verified by the test suite and await the next deploy. Two of them — D-15's `https` redirect and D-13's `Content-Type` case — were *reproduced* on production, so both are re-checked there once it ships.
-**Supersedes:** `FlowDesk_API_Contract.docx` v1.0, `api-contract-sprint2.md`, `api-contract-sprint3.md`, and v2.0 of this file.
+**Covers:** the entire shipped backend — Sprints 1–4 (UC-02 … UC-11, US-01 … US-16), plus tenant workspace settings.
+**UC-01 is the one exception, and v2.1 was wrong to claim it.** UC-01 is *Manage Platform Settings*: System Admin, platform name and default categories, effective across all tenants. What ships is the **organisation-scoped** settings screen (§4.10) — Tenant Admin, organisation name and timezone. It closes the defect a user could see (D-18: Save did nothing) and leaves the use case as written unbuilt (D-19). Said plainly here rather than left implied by an endpoint called "settings".
+**Status:** implemented and merged to `main`. Sprints 1–3 verified against the live deployment on 30 July 2026; the Sprint 4 defect fixes (§7.2) are verified by the test suite — 405 passing, up from 310 at v2.1 — and D-15's `https` redirect was independently re-probed on production by Brad on 12 August. Everything added in v2.2 awaits the next deploy and is re-checked there once it ships.
+**Supersedes:** `FlowDesk_API_Contract.docx` v1.0, `api-contract-sprint2.md`, `api-contract-sprint3.md`, and v2.0 / v2.1 of this file.
+
+**What changed since v2.1** — v2.1 was a consolidation with no new endpoints, which caused a
+sprint-week misunderstanding worth not repeating; this revision *does* change behaviour:
+
+| Change | § |
+|---|---|
+| **New:** `GET` / `PATCH /api/v1/settings` (D-18) | 4.10 |
+| **Changed:** analytics weeks are bucketed in the **organisation's** timezone, not the platform's | 4.9, 4.10 |
+| **Changed:** `PATCH /categories` — an explicit `null` description now *clears* it (D-10) | 4.3 |
+| **Changed:** reassigning to the current assignee is a no-op — no notification, no audit line (D-11) | 4.6 |
+| **Additive:** every remaining error carries `details.reason`; stop matching on message text (D-5, D-12) | 3.1.3 |
+| **Additive:** `405` responses carry `Allow` again (D-8) | 3.1.3 |
+| **Additive:** `UserOut` and `IncidentOut` carry `tenant_id` (D-7) | 5 |
 
 This is the single canonical contract. It replaces the three documents above — they were a
 Sprint-1 base plus two deltas, which meant answering "what does this endpoint do?" required
@@ -76,13 +90,15 @@ production by anyone. Flagged as a defect in §7.2.
 
 ### 1.4 Endpoint index
 
-26 operations across 19 paths. Everything under `/api/v1` except `GET /health`.
+28 operations across 20 paths. Everything under `/api/v1` except `GET /health`.
 
 | Method | Path | Roles | Success | § |
 |---|---|---|---|---|
 | GET | `/health` | **public** | `200` | 4.1 |
 | GET | `/me` | any authenticated | `200` | 4.1 |
 | POST | `/organizations` | **public** | `201` | 4.2 |
+| GET | `/settings` | `tenant_admin` | `200` | 4.10 |
+| PATCH | `/settings` | `tenant_admin` | `200` | 4.10 |
 | GET | `/categories` | any authenticated | `200` | 4.3 |
 | POST | `/categories` | `tenant_admin` | `201` | 4.3 |
 | GET | `/categories/{category_id}` | any authenticated | `200` | 4.3 |
@@ -419,9 +435,22 @@ default arm rather than assuming the list is closed.
 
 #### 3.1.3 Complete reason register
 
-This is every error the application can produce. `details.reason` is listed as `—` where the
-raise site passes no details, in which case `details` is the empty object `{}` and the only
-discriminator is the message string. Those gaps are tracked as a defect in §7.2.
+This is every error the application can produce.
+
+**Changed in Sprint 4 (D-5, D-12).** Every row now carries a `details.reason`. There used to be
+six that did not: `details` was the empty object and the only discriminator was the message
+string — text that exists to be reworded, and which had already been reworded once. **Match on
+`error.details.reason`, never on `error.message`.** A message change is a copy edit; a slug
+change is a contract break and is versioned here.
+
+Two consequences worth naming, because they were the point rather than side effects:
+
+- The two 404s that mean entirely different things — "there is no such URL" and "that record is
+  not yours" — are now `route_not_found` and the scope slugs. They still share `code: not_found`
+  and are otherwise identical on the wire.
+- The two email `409`s on `POST /users` are now `user_email_taken` (free elsewhere, taken inside
+  your organisation — an admin can act on it) and `email_registered` (registered globally in
+  Supabase — an admin can neither see nor fix it). They read identically before.
 
 **401 `unauthorized`**
 
@@ -432,7 +461,7 @@ discriminator is the message string. Those gaps are tracked as a defect in §7.2
 | `invalid_token` | `Invalid authentication token.` | Bad or tampered signature; wrong `aud`; wrong `iss`; a missing required claim; an algorithm outside `RS256`/`ES256`; **and every JWKS failure** (see the warning below) |
 | `verification_failed` | `Unable to verify authentication token.` | Effectively unreachable — see the warning below |
 | `user_not_provisioned` | `User is not provisioned.` | The token verified but `sub` matches no row in `users`, or `sub` is not a parseable UUID |
-| `—` | `User tenant not found.` | `GET /me` only: the user's row references a `tenant_id` with no matching tenant. **The only 401 in the API with no reason slug.** |
+| `tenant_not_found` | `User tenant not found.` | The user's row references a `tenant_id` with no matching tenant. `GET /me` and `GET`/`PATCH /settings`. Was the only 401 with no slug (D-12) — and the one where force-logging-out is the wrong reaction, since the token itself is fine. |
 
 > **Correction to the v1.0 contract — read this if you wrote auth error handling.**
 > v1.0 documented `verification_failed` as the slug for a JWKS outage ("Supabase JWKS endpoint
@@ -460,26 +489,26 @@ discriminator is the message string. Those gaps are tracked as a defect in §7.2
 Note the two `privilege_escalation` cases share a slug but have different messages — you cannot
 tell create from grant using `details` alone, only by which endpoint you called.
 
-**404 `not_found`** — all carry `details: {}` except `notification_not_found`.
+**404 `not_found`** — every row carries a slug as of Sprint 4 (D-5).
 
 | `details.reason` | Message | Trigger |
 |---|---|---|
-| `—` | `User not found.` | `/users/{id}` — no such user, **or** another tenant's user |
-| `—` | `Category not found.` | `/categories/{id}` — no such category, **or** another tenant's |
-| `—` | `Incident not found or you do not have permission to view it.` | `/incidents/{id}` and its sub-paths — absent, another tenant's, or outside your visibility |
-| `—` | `Incident not found.` | `POST /incidents` internal re-read. Not reachable in normal operation, but it is a **distinct string**, so message-matching code must handle both |
+| `user_not_found` | `User not found.` | `/users/{id}` — no such user, **or** another tenant's user |
+| `category_not_found` | `Category not found.` | `/categories/{id}` — no such category, **or** another tenant's |
+| `incident_not_found` | `Incident not found or you do not have permission to view it.` | `/incidents/{id}` and its sub-paths — absent, another tenant's, or outside your visibility |
+| `incident_not_found` | `Incident not found.` | `POST /incidents` internal re-read. Not reachable in normal operation. The message is still a **distinct string**, but the slug is deliberately the same one, so message-matching code is no longer needed to cover both |
 | `notification_not_found` | `Notification not found.` | `POST /notifications/{id}/read` — absent, someone else's, or another tenant's |
-| `—` | `Not Found` | **Starlette's**, for a URL matching no route at all. Same `code` and `details: {}` as a real scope 404, distinguishable only by the message |
+| `route_not_found` | `Not Found` | **Starlette's**, for a URL matching no route at all. Was indistinguishable from a real scope 404 — same `code`, same empty `details` — which mattered because the scope 404s are tenant-isolation refusals and this one is a typo |
 
-**409 `conflict`** — every one carries `details: {}` **except** the four slugged rows below.
+**409 `conflict`** — every row carries a slug as of Sprint 4 (D-5).
 
 | `details.reason` | Message | Trigger |
 |---|---|---|
-| `—` | `An organisation with this name already exists.` | `POST /organizations`: case-insensitive pre-check, **and** a database integrity failure on commit. Three different constraints funnel into this one message |
-| `—` | `A user with this email is already registered.` | `POST /organizations`: the email exists in Supabase Auth globally |
-| `—` | `A user with this email already exists in your organisation.` | `POST /users`: two distinct raise sites emit this identical string |
-| `—` | `A user with this email already exists.` | `POST /users`: registered globally in Supabase and recovery failed |
-| `—` | `A category with this name already exists.` | `POST`/`PATCH /categories`: unique per `(tenant, name)`, compared **exactly** — case- and whitespace-sensitive |
+| `organization_name_taken` | `An organisation with this name already exists.` | `POST /organizations` and `PATCH /settings`: case-insensitive pre-check, **and** a database integrity failure on commit. Several constraints funnel into this one message and one slug |
+| `email_registered` | `A user with this email is already registered.` | `POST /organizations`: the email exists in Supabase Auth globally |
+| `user_email_taken` | `A user with this email already exists in your organisation.` | `POST /users`: two distinct raise sites emit this identical string, and now the identical slug |
+| `email_registered` | `A user with this email already exists.` | `POST /users`: registered globally in Supabase and recovery failed. Same slug as the organisation case above — same cause, same thing the caller can do about it (nothing) |
+| `category_name_taken` | `A category with this name already exists.` | `POST`/`PATCH /categories`: unique per `(tenant, name)`, compared **exactly** — case- and whitespace-sensitive. Note this differs from the organisation rename, which is case-**in**sensitive |
 | `category_in_use` | `This category is referenced by existing incidents and cannot be deleted.` | `DELETE /categories/{id}` with at least one referencing incident, **of any status**. Both the message and the slug changed in Sprint 4: the old wording said "open incidents", and closed ones blocked the delete too — with a `500` instead of this `409` (D-2) |
 | `last_tenant_admin` | `This is the organisation's last active administrator. Appoint another administrator before changing this account.` | Deactivating, demoting or promoting away the tenant's only active `tenant_admin` — `POST /users/{id}/deactivate` or `PATCH /users/{id}`. New in Sprint 4 (D-3) |
 | `invalid_transition` | `This transition is not permitted from the current state.` | §4.6. **Also carries `from_status`, `to_status`, `allowed`** |
@@ -495,6 +524,7 @@ tell create from grant using `details` alone, only by which endpoint you called.
 | `invalid_assignee` | `The selected user is not an active reviewer in this organisation.` | `POST /incidents/{id}/assign` |
 | `invalid_date_range` | `The start date must not be after the end date.` | `GET /analytics/volume` |
 | `date_range_too_large` | `The requested date range is too large. Request at most 53 weeks.` | `GET /analytics/volume`. **Also carries `max_weeks`** |
+| `invalid_timezone` | `That is not a recognised IANA timezone name.` | `PATCH /settings`. Checked against `zoneinfo`, which reads the same tzdb PostgreSQL's `AT TIME ZONE` does — so a stored zone can never break the analytics query later (§4.10) |
 
 **502 `upstream_error` / 503 `upstream_unavailable`** — Supabase Auth failed.
 
@@ -530,8 +560,11 @@ Produced when the path exists but the method does not, e.g. `POST /api/v1/notifi
 `POST /api/v1/analytics/volume`, `DELETE /api/v1/users/{id}`, `PUT /api/v1/categories/{id}`,
 `POST /health`.
 
-**Note:** the `Allow` response header is **dropped** by the error handler. HTTP says a 405 should
-list the permitted methods; this API does not. Do not build anything that reads `Allow`.
+**`Allow` is back as of Sprint 4 (D-8).** A 405 now lists the permitted methods, as HTTP requires
+— e.g. `Allow: GET` on `POST /api/v1/notifications`. The header was being produced correctly by
+the router all along and thrown away by the envelope handler, so the API was telling a client its
+request was wrong without ever saying what would have been right. v2.1 said "do not build
+anything that reads `Allow`"; that advice is withdrawn.
 
 #### 3.1.4 Responses that are NOT in the envelope
 
@@ -792,7 +825,9 @@ Any authenticated user. `200` → `MeResponse`.
 Call this immediately after login: it is the only way to learn the caller's role and tenant,
 because neither is readable from the token (§2.1). `id` equals the Supabase auth user id.
 
-Errors: `401` `—` `User tenant not found.` if the user's tenant row is missing (§3.1.3).
+Errors: `401` `tenant_not_found` `User tenant not found.` if the user's tenant row is missing
+(§3.1.3). The slug is new in Sprint 4 (D-12) — note the token is valid in this case, so this is
+not a 401 to force a logout on.
 
 #### `GET /health`
 
@@ -835,8 +870,8 @@ set-password link (§2.6). The admin cannot log in until they follow it.
 
 | Status | `reason` | Message | Cause |
 |---|---|---|---|
-| 409 | `—` | `An organisation with this name already exists.` | Name taken, compared **case-insensitively**. Also emitted when the database rejects the insert — see the note below |
-| 409 | `—` | `A user with this email is already registered.` | The email already exists in Supabase Auth, globally across all tenants |
+| 409 | `organization_name_taken` | `An organisation with this name already exists.` | Name taken, compared **case-insensitively**. Also emitted when the database rejects the insert — see the note below |
+| 409 | `email_registered` | `A user with this email is already registered.` | The email already exists in Supabase Auth, globally across all tenants |
 | 422 | `—` | `Request validation failed.` | Field constraints |
 | 405 | `—` | `Method Not Allowed` | Any method other than POST — there is no list, get or update for organisations |
 
@@ -916,9 +951,14 @@ another tenant's. A malformed UUID is `422`, not `404`.
 { "name": "Hardware", "description": "…" }   // both optional
 ```
 
-**`null` means "leave unchanged", not "clear".** There is consequently **no way through this API
-to reset a description back to empty** once it is set. If your edit form needs a clear button,
-say so — it is a one-line change (§7.3).
+**Changed in Sprint 4 (D-10). `description: null` now clears the description**; omitting the key
+leaves it unchanged. v2.1 said `null` meant "leave unchanged" and that there was no way to reset a
+description once set — both are now out of date. Absence and explicit null are distinguished by
+which keys the request body actually contained, so `{"name": "Hardware"}` cannot wipe a
+description by accident.
+
+`name` keeps the old rule: `null` means unchanged, because `categories.name` is NOT NULL and
+"clear the name" has no meaning to express.
 
 Unknown keys are silently dropped. `409` on a duplicate name, `404` if out of scope.
 
@@ -960,9 +1000,10 @@ own tenant and has `?tenant_id=` **silently ignored**.
 | `limit` / `offset` | 1..100 / ≥0 | 50 / 0 |
 
 A `system_admin` with no `?tenant_id=` gets **every user in every tenant**, with no tenant
-predicate at all. Since `UserOut` carries no `tenant_id` (§5), such a list is ambiguous — you
-cannot tell which organisation a row belongs to. Pin a tenant with `?tenant_id=` if you need
-that. An unknown tenant UUID is not an error; it simply matches nothing.
+predicate at all. Every row carries `tenant_id` as of Sprint 4 (D-7), so such a list can be
+grouped by organisation — before that it was ambiguous and you could not tell which organisation
+a row belonged to. Pin a tenant with `?tenant_id=` if you would rather filter than group. An
+unknown tenant UUID is not an error; it simply matches nothing.
 
 #### `POST /api/v1/users`
 
@@ -985,8 +1026,8 @@ the wrong organisation — put it in the query string.
 | Status | `reason` | Message |
 |---|---|---|
 | 403 | `privilege_escalation` | `Only System Admins can create System Admin accounts.` |
-| 409 | `—` | `A user with this email already exists in your organisation.` |
-| 409 | `—` | `A user with this email already exists.` (registered globally in Supabase) |
+| 409 | `user_email_taken` | `A user with this email already exists in your organisation.` |
+| 409 | `email_registered` | `A user with this email already exists.` (registered globally in Supabase) |
 
 Emails are unique per tenant, compared **case-insensitively** — so the same person can exist in
 two different tenants, but not twice in one.
@@ -1246,10 +1287,13 @@ validated**, so a closed incident plus a garbage assignee returns `409`, not `42
 The target must be an **active reviewer in the incident's tenant**. One message covers all
 failure modes — no such user, wrong tenant, wrong role, inactive — so nothing leaks.
 
-Reassignment writes **no timeline row** (§4.5 note 3). Reassigning to the user who is already
-the assignee is accepted as a `200` and still sends that user another notification and writes
-another audit line — there is no no-op short-circuit, so avoid firing it on an unchanged
-dropdown.
+Reassignment writes **no timeline row** (§4.5 note 3).
+
+**Changed in Sprint 4 (D-11).** Reassigning to the user who is *already* the assignee is now a
+genuine no-op: still `200` with the unchanged record, but **no notification and no audit line**.
+v2.1 warned you to avoid firing it on an unchanged dropdown; that is no longer your problem to
+guard. The short-circuit runs after both checks above, so a closed incident still answers `409`
+and an ineligible assignee still answers `422` — you cannot use it to probe either.
 
 ### 4.7 *(retired — was "Reserved (Sprint 3)")*
 
@@ -1466,6 +1510,72 @@ the SRS, and step 4's reading ships, because US-16 asks for *operational load* a
 date-windowed version answers a different question (the status of incidents *created* in that
 window). Flagged with Fady; adding `from`/`to` later is a copy-paste of the volume params.
 
+**Which timezone the buckets are computed in — changed in Sprint 4.** It used to be
+`REPORTING_TIMEZONE`, one value for the entire platform. It is now the **organisation's own**
+`timezone` (§4.10), so a Perth tenant sees Perth weeks. The `timezone` field in the volume
+response tells you which zone actually produced the buckets — read it rather than assuming, and
+label the axis from it. One exception: a System Admin querying **across all tenants** (no
+`tenant_id`) has no single tenant zone available, so the platform default is used and echoed.
+Narrow the query with `tenant_id` and that tenant's zone applies again.
+
+---
+
+### 4.10 Settings (the workspace settings screen)
+
+New in Sprint 4. Closes D-18 — the settings page previously had no backend at all, so Save
+issued no request and the page reported success regardless.
+
+**Read the scope note before you build against this.** These are the settings of **one
+organisation**, edited by its own Tenant Admin. They are *not* UC-01's **platform** settings:
+that use case names System Admin as the actor and "platform name, default categories" as the
+content, effective across all tenants. None of that is built, and D-19 tracks it. The section
+title says "Settings" and not "Platform Settings" for exactly that reason.
+
+#### `GET /api/v1/settings` · `PATCH /api/v1/settings`
+
+`tenant_admin` only — the same gate as categories (§4.3), because both are tenant workspace
+configuration and they must not disagree about who may change it. `system_admin` is **excluded**,
+which is D-6 and still open: a System Admin carries their own `tenant_id`, so letting them
+through would silently edit their own organisation rather than the one they meant. `staff` and
+`reviewer` get `403 insufficient_role` with `details.required`.
+
+There is no tenant id in the path. The route reads the caller's own scope and offers no way to
+name a different organisation — that is the whole of the NFR-12 story for this endpoint.
+
+```jsonc
+{
+  "id": "0d9f…",
+  "name": "FlowDesk Demo — North",
+  "timezone": "Australia/Melbourne",
+  "created_at": "2026-07-02T04:11:09.482Z",
+  "updated_at": "2026-08-12T03:52:41.006Z"
+}
+```
+
+`PATCH` takes `name`, `timezone`, or both. Both columns are NOT NULL, so **`null` means "leave
+this alone"** — unlike `PATCH /categories`, where `null` now clears the description (D-10).
+Clearing is only meaningful for a nullable column and neither of these is one; there is no way
+to express "this organisation has no name".
+
+The response **is** the confirmation (UC-01 step 5). There is no separate message: returning the
+saved record lets you render what was stored rather than what was typed, which is the exact
+distinction D-18 failed on.
+
+| Status | `details.reason` | Trigger |
+|---|---|---|
+| `422` | `invalid_timezone` | Not a name the IANA tzdb knows. Validated server-side against `zoneinfo`, which reads the same database PostgreSQL's `AT TIME ZONE` does, so anything accepted here is a zone the analytics queries accept. Case-sensitive: `australia/melbourne` is refused. |
+| `422` | `—` (`details.errors`) | `name` shorter than 2 or longer than 255; `timezone` longer than 64 |
+| `409` | `organization_name_taken` | Another organisation already holds that name. Compared **case-insensitively**, unlike the category conflict — `tenants.name` is globally unique and "Acme"/"acme" is one organisation to a human. Renaming to your own current name is a no-op, not a conflict. |
+| `403` | `insufficient_role` | Any role other than `tenant_admin` |
+
+**`timezone` is load-bearing, not decorative.** It is what `GET /analytics/volume` buckets by
+(§4.9). Changing it re-cuts the weekly chart for that organisation on the next request, so treat
+it as a data-affecting setting in your UI rather than a display preference.
+
+**What is not here.** No `PUT`, so `PATCH` is the only write and a partial body is the norm.
+Nothing about categories: the "default categories" half of UC-01 is unbuilt (D-19), and
+`POST /organizations` still creates a new tenant with **zero** categories.
+
 ---
 
 ## 5. Data models
@@ -1502,8 +1612,16 @@ responses. This mirrors `/openapi.json`, which is authoritative for shapes.
 
 | Field | Type | Rule |
 |---|---|---|
-| `name` | string | 1–255. Required on create, optional on update |
-| `description` | string \| null | ≤ 2000, optional. On update `null` means leave unchanged, **not** clear (§4.3) |
+| `name` | string | 1–255. Required on create, optional on update. On update `null` means leave unchanged |
+| `description` | string \| null | ≤ 2000, optional. On update `null` **clears** it and omitting the key leaves it unchanged — changed in Sprint 4, D-10 (§4.3) |
+
+**`TenantSettingsUpdate`** — both optional; `null` means leave unchanged for both, since neither
+column is nullable (§4.10).
+
+| Field | Type | Rule |
+|---|---|---|
+| `name` | string \| null | 2–255. Globally unique, compared case-insensitively |
+| `timezone` | string \| null | 1–64, must be an IANA zone name (`422 invalid_timezone` otherwise) |
 
 **`IncidentCreate`**
 
@@ -1534,12 +1652,18 @@ responses. This mirrors `/openapi.json`, which is authoritative for shapes.
 
 **`OrgRegisterResponse`** — `tenant` (`TenantOut`), `admin_user` (`AdminUserOut`).
 
-**`TenantOut`** — `id`, `name`, `created_at`. **`TenantRef`** — `id`, `name`.
+**`TenantOut`** — `id`, `name`, `created_at`. **`TenantRef`** — `id`, `name`. Neither gained the
+new columns: `TenantOut` is the registration response and `TenantRef` is the `GET /me` projection,
+and neither is the settings screen.
+
+**`TenantSettingsOut`** — `id`, `name`, `timezone`, `created_at`, `updated_at` (§4.10). New in
+Sprint 4.
 
 **`AdminUserOut`** — `id`, `email`, `name`, `role`, `status`. No `created_at`.
 
-**`UserOut`** — `id`, `email`, `name`, `role`, `status`, `created_at`. **No `tenant_id`, no
-`updated_at`** (§3.3, §4.4).
+**`UserOut`** — `id`, **`tenant_id`**, `email`, `name`, `role`, `status`, `created_at`. No
+`updated_at` (§3.3, §4.4). `tenant_id` is new in Sprint 4 (D-7) — a Tenant Admin can ignore it,
+a System Admin needs it to group an all-tenant list by organisation.
 
 **`UserRef`** — `id`, `name`, `email`. Used for `submitted_by`, `assigned_to`,
 `transitioned_by`.
@@ -1548,9 +1672,9 @@ responses. This mirrors `/openapi.json`, which is authoritative for shapes.
 
 **`CategoryRef`** — `id`, `name`.
 
-**`IncidentOut`** — `id`, `title`, `severity`, `status`, `category` (`CategoryRef`),
-`submitted_by` (`UserRef`), `assigned_to` (`UserRef` \| null), `created_at`, `updated_at`. **No
-`tenant_id`, no `description`.**
+**`IncidentOut`** — `id`, **`tenant_id`**, `title`, `severity`, `status`, `category`
+(`CategoryRef`), `submitted_by` (`UserRef`), `assigned_to` (`UserRef` \| null), `created_at`,
+`updated_at`. No `description`. `tenant_id` is new in Sprint 4 (D-7).
 
 **`IncidentDetail`** — everything in `IncidentOut` plus `description`, `transitions`
 (`TransitionOut[]`), `allowed_transitions` (`IncidentStatus[]`, caller-dependent).
@@ -1589,8 +1713,8 @@ no `tenant_id`.
 | Health probe | `GET https://flowdesk-backend.fly.dev/health` → `{"status":"ok"}` |
 
 **Verified against the live deployment on 30 July 2026:** both CORS origins answer preflight with
-`allow-credentials: true` and `max-age: 600`; `/openapi.json` serves all 19 paths including
-notifications and analytics; an unauthenticated `GET /me` returns exactly
+`allow-credentials: true` and `max-age: 600`; `/openapi.json` served all 19 paths of that
+revision (20 as of v2.2, with `/settings` added); an unauthenticated `GET /me` returns exactly
 `{"error":{"code":"unauthorized","message":"Missing authentication token.","details":{"reason":"missing_token"}}}`.
 
 **Before you ship, make sure you have:**
@@ -1640,9 +1764,24 @@ the reason this document exists as a rewrite rather than a third delta.
 
 Found while writing this contract. Listed here rather than quietly omitted, because a contract
 that hides them is worse than one that names them. These double as Defect Register entries for
-Assessment 3. Sprint 4 closed six of them outright and a seventh in part; the `Status` column
-says which, and each fixed row keeps its original description so the register still reads as a
+Assessment 3. Each fixed row keeps its original description so the register still reads as a
 history rather than a list of things that were never wrong.
+
+**State of this register at the Sprint 4 freeze: twelve of fifteen closed, one in part, two open
+by decision.** The first wave (D-1, D-2, D-3, D-13, D-14, D-15, D-4 in part) was the set a tester
+or the demo would actually hit. The second wave — D-5, D-7, D-8, D-10, D-11, D-12 — is everything
+that was left and reachable, all of it additive.
+
+The two that remain open are open **on purpose**, and both are worth stating out loud rather than
+letting them read as things nobody got to:
+
+- **D-9** (`/docs` and `/openapi.json` public in production) is deliberately **not** being closed
+  before the demo. Brad and Fady use both to probe the live API; taking them away during the
+  final sprint would cost more than the exposure does. It is scheduled for immediately after.
+- **D-6** (`system_admin` cannot write categories, settings, or workflow) needs a product
+  decision before code. A System Admin carries their own `tenant_id`, so simply widening the gate
+  would silently write into their own organisation rather than the one they are looking at. The
+  fix is a tenant selector, not a role list.
 
 | # | Severity | Status | Defect |
 |---|---|---|---|
@@ -1652,15 +1791,17 @@ history rather than a list of things that were never wrong.
 | D-2 | High | **Fixed** (Sprint 4) | **`DELETE /categories/{id}` returned `500`** for a category referenced only by *closed* incidents — the guard checked non-closed only, then the foreign key failed. Now a `409 category_in_use` for a reference of any status, with an `IntegrityError` branch closing the check-then-act race. §4.3 |
 | D-3 | Medium | **Fixed** (Sprint 4) | **Self-deactivation locked an admin out permanently**, and a sole admin could brick their tenant. Now `403 self_deactivation` and `409 last_tenant_admin`, the latter also covering the `PATCH` route that demotes or promotes the last admin away. §4.4 |
 | D-4 | Medium | **Partly fixed** (Sprint 4) | **Orphaned Supabase auth users on timeout.** Compensation covers database failures but not a timed-out invite call, permanently trapping that email on a `409`. Three changes: `get_user_by_email` now paginates (it read one 50-row page, so every recovery path silently no-opped past 50 auth users), the attempted address is logged on every unreachable call so an operator can find it, and the authenticated `POST /users` adopts a genuinely orphaned account on retry. **`POST /organizations` deliberately does not** — it is public, and the same `503` covers a cheap-to-trigger rate limit, so adoption there would be an account-squatting primitive. See §7.3. §4.2, §4.4 |
-| D-5 | Medium | Open | **Six errors shipped with `details: {}`** (`User not found.`, `Category not found.`, both incident 404s, the category and email `409`s, both organisation `409`s), so a client must match on message text. Backfilling `details.reason` is additive and safe. D-2's fix gave the category `409` the slug `category_in_use`, so **five** are left. §3.1.3 |
-| D-6 | Low | Open | **`system_admin` cannot write categories or perform workflow actions** (`403`). Probably unintended, since it is cross-tenant everywhere else. §2.9 |
-| D-7 | Low | Open | **Cross-tenant lists are unlabelled** — `UserOut` and `IncidentOut` carry no `tenant_id`, so a System Admin's all-tenant list cannot be grouped by organisation. §4.4, §4.5 |
+| D-5 | Medium | **Fixed** (Sprint 4) | **Six errors shipped with `details: {}`** (`User not found.`, `Category not found.`, both incident 404s, the category and email `409`s, both organisation `409`s), so a client must match on message text. Backfilling `details.reason` is additive and safe. D-2's fix gave the category `409` the slug `category_in_use`, so **five** are left. Now closed, and wider than the original entry: the framework's own routing 404 was slugged too (`route_not_found`), because sharing `code: not_found` and an empty `details` with the tenant-isolation refusals made a typo indistinguishable from a scope denial. §3.1.3 |
+| D-6 | Low | Open **(needs a product decision)** | **`system_admin` cannot write categories or perform workflow actions** (`403`). Probably unintended, since it is cross-tenant everywhere else. Now also applies to `PATCH /settings`, which was gated to match categories rather than invent a third answer. Not fixable as a role-list edit — see the note above §7.2's table. §2.9, §4.10 |
+| D-7 | Low | **Fixed** (Sprint 4) | **Cross-tenant lists are unlabelled** — `UserOut` and `IncidentOut` carry no `tenant_id`, so a System Admin's all-tenant list cannot be grouped by organisation. Both now carry it; `IncidentDetail` inherits it. Purely additive — no field renamed or removed. §4.4, §4.5, §5 |
 | D-15 | Medium | **Fixed** (Sprint 4) | **The trailing-slash `307` redirected to `http://`, not `https://`** — the app did not honour the proxy's forwarded-proto header, so a browser blocked the redirect as mixed content while curl followed it happily. **Verified on production.** The register called this "a one-line proxy-header setting", which would not have worked: uvicorn already mounts the middleware and `--proxy-headers` is its default; the problem was `forwarded-allow-ips`, which trusts only `127.0.0.1` while Fly Proxy arrives over 6PN. Fixed by mounting `ProxyHeadersMiddleware(trusted_hosts="*")` in the app, where it is also testable. §3.1.4 |
-| D-8 | Low | Open | **`405` drops the `Allow` header.** §3.1.3 |
-| D-9 | Low | Open | **`/docs` and `/openapi.json` are public in production** — `APP_ENV` exists but is never read. §1.3 |
-| D-10 | Low | Open | **No way to clear a category description** — `null` means "unchanged". §4.3 |
-| D-11 | Low | Open | **A no-op reassign still notifies and audits.** §4.6 |
-| D-12 | Low | Open | **`GET /me` can return a `401` with no reason slug** (`User tenant not found.`) — the only one in the API. §3.1.3 |
+| D-8 | Low | **Fixed** (Sprint 4) | **`405` drops the `Allow` header.** The router was producing it correctly the whole time; the envelope handler discarded every header on the way out, so restoring it was one argument. §3.1.3 |
+| D-9 | Low | Open **(deferred by decision)** | **`/docs` and `/openapi.json` are public in production** — `APP_ENV` exists but is never read. Held open until after the A4 demo: both are in active use by the frontend lead and the product owner for probing the live API. Not an oversight; see the note above the table. §1.3 |
+| D-10 | Low | **Fixed** (Sprint 4) | **No way to clear a category description** — `null` means "unchanged". Absence and explicit null are now distinguished via `model_fields_set`, so `null` clears and omission leaves alone. Note the asymmetry with `name`, which is NOT NULL and therefore still reads `null` as "unchanged". §4.3 |
+| D-11 | Low | **Fixed** (Sprint 4) | **A no-op reassign still notifies and audits.** A double-clicked button read as two hand-offs and pinged a reviewer about work that had not moved. Now returns `200` with the unchanged record and writes nothing — matching `POST /transitions`, which has treated "already in that state" as satisfied since Sprint 2. The early return sits *after* the closed and invalid-assignee guards, so neither can be bypassed. §4.6 |
+| D-12 | Low | **Fixed** (Sprint 4) | **`GET /me` can return a `401` with no reason slug** (`User tenant not found.`) — the only one in the API. Now `tenant_not_found`. This is the 401 where the token is valid, so a client that force-logs-out on every unrecognised 401 was doing the wrong thing here. §3.1.3 |
+| D-18 | **High** | **Fixed** (Sprint 4) **— against the screen, not against UC-01** | **Platform settings could not be saved.** No settings router, no settings model, no column: `Save` issued no request and the page reported success anyway (`tc01_before.png` and `tc01_after.png` are byte-identical). The organisation-scoped screen now persists (§4.10). **What is not fixed:** UC-01 as written — System Admin, platform name, default categories, effective across all tenants. That is D-19. §4.10 |
+| D-19 | **High** | Open **(needs a product decision)** | **"Platform settings" was never defined.** UC-01 names one feature and the prototype screen implements another; building against the screen was the Sprint 4 call because it is the one a demo touches, and it leaves the use case unbuilt. Two consequences: TC-01's second half inverts (Tenant Admin is now the *permitted* actor, so the denial falls on staff/reviewer and the case needs rewording), and `POST /organizations` still creates a tenant with **zero** categories because the "default categories" hook has nothing behind it. §4.10 |
 
 ### 7.3 Open questions
 
@@ -1676,12 +1817,12 @@ history rather than a list of things that were never wrong.
 4. **Reassignment in the user-visible timeline** — currently audit-log only; adding it needs a
    schema change.
 5. **Should `system_admin` be a strict superset of `tenant_admin`?** (D-6.)
-6. **Priority for the defect register above** — **shipped in Sprint 4.** The proposal was D-1
-   (the generic handler, which also fixes D-13 and D-14), D-2, D-15 and D-3; all four landed,
-   plus D-4 in part. What remains is **D-5** (backfilling `details.reason` on the five errors
-   that still ship `details: {}`), **D-6** and **D-7** — all three purely additive, none of
-   them reachable by a tester or a demo. No further defect work is scheduled unless testing
-   Friday turns something up.
+6. **Priority for the defect register above** — **closed out in Sprint 4.** The proposal was
+   D-1 (the generic handler, which also fixes D-13 and D-14), D-2, D-15 and D-3; all four
+   landed, plus D-4 in part. The remainder — D-5, D-7, D-8, D-10, D-11, D-12 — landed in the
+   second half of the sprint. **Nothing is left open for want of time.** D-6 and D-9 are open
+   by decision and both need something from you: D-6 a product call (a tenant selector, not a
+   role list), D-9 a date after the demo. Items 4 and 7 below are the other two.
 7. **Should a public registration recover itself after a timed-out invite?** New, and the one
    decision D-4 could not make on the backend's own authority. Today `POST /organizations`
    answers `503` and the stranded email is cleared by hand; the authenticated `POST /users`
@@ -1714,9 +1855,9 @@ history rather than a list of things that were never wrong.
 
 | | |
 |---|---|
-| Backend (Ivan) | Contract matches the deployed code as of 7 August 2026 ✅ (Sprint 4: D-1, D-13, D-14, D-2, D-15, D-3 fixed; D-4 in part) |
-| Frontend (Brad) | ☐ Confirm §7.3 items 1–8 — item 8 is the only one that changes your code |
-| Product (Fady) | ☐ Confirm §7.3 items 1–7; approve making this file canonical |
+| Backend (Ivan) | Contract matches `main` as of 12 August 2026 ✅ — 405 tests green, migration `0004` round-trips (`upgrade head` → `alembic check` clean → `downgrade base`). Sprint 4 closed D-1, D-13, D-14, D-2, D-15, D-3, D-5, D-7, D-8, D-10, D-11, D-12 and D-18; D-4 in part. Awaiting deploy. |
+| Frontend (Brad) | ☐ Confirm §7.3 items 1–8, and the four behaviour changes in the v2.2 table at the top — `tenant_id` on `UserOut`/`IncidentOut` and the `null`-clears-description rule are the two that touch your code |
+| Product (Fady) | ☐ **D-19: reword TC-01** (its second half inverts — see §4.10). ☐ **D-6:** should a System Admin be able to write inside a tenant, and if so how do they pick which one? ☐ **D-9:** confirm it closes the week after the demo. ☐ Confirm §7.3 items 1–5, 7; approve making this file canonical |
 
 Any change to the API is versioned in this file and reflected automatically in
 `/openapi.json`.

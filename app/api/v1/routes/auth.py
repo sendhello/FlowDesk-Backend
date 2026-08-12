@@ -22,7 +22,11 @@ async def read_me(
     """Resolve the authenticated caller's identity, role and tenant (US-05)."""
     tenant = await db.get(Tenant, user.tenant_id)
     if tenant is None:
-        raise UnauthorizedError("User tenant not found.")
+        # D-12: this used to be the only 401 in the API with no reason slug, so a client
+        # had to match on the message string to tell it from an expired token.
+        raise UnauthorizedError(
+            "User tenant not found.", details={"reason": "tenant_not_found"}
+        )
     return MeResponse(
         id=user.id,
         email=user.email,

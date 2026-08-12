@@ -57,6 +57,7 @@ def _detail(incident: Incident, actor: CurrentUser) -> IncidentDetail:
     """
     return IncidentDetail(
         id=incident.id,
+        tenant_id=incident.tenant_id,
         title=incident.title,
         description=incident.description,
         severity=incident.severity,

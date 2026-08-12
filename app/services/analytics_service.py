@@ -38,6 +38,7 @@ from app.core.config import settings
 from app.core.exceptions import ValidationError
 from app.models.enums import IncidentStatus, Severity
 from app.models.incident import Incident
+from app.models.tenant import Tenant
 
 if TYPE_CHECKING:  # pragma: no cover
     from app.api.deps import TenantScope
@@ -50,18 +51,49 @@ DEFAULT_WEEKS: int = 12
 MAX_WEEKS: int = 53
 
 
-def reporting_tz() -> ZoneInfo:
-    """The configured reporting timezone. Validated at start-up (app.core.config)."""
-    return ZoneInfo(settings.reporting_timezone)
+def reporting_tz(tz_name: str | None = None) -> ZoneInfo:
+    """The zone to report in: the tenant's if one applies, else the platform default.
+
+    `tz_name` is optional throughout this module so the pure date helpers stay callable
+    without a database, which is what `tests/test_reporting_window.py` exercises. When it
+    is omitted the behaviour is exactly what it was before tenants had a timezone.
+
+    Both values are validated before they reach here — the platform default at start-up
+    (`app.core.config`), a tenant's on write (`settings_service`) — so this never has to
+    defend against a bad name.
+    """
+    return ZoneInfo(tz_name or settings.reporting_timezone)
 
 
-def today_local() -> date:
+def today_local(tz_name: str | None = None) -> date:
     """Today in the reporting timezone.
 
     NOT `date.today()`: that reads the server clock, which is UTC on Fly, and would drop
     the current day for the ten hours each night that Melbourne is already tomorrow.
     """
-    return datetime.now(reporting_tz()).date()
+    return datetime.now(reporting_tz(tz_name)).date()
+
+
+async def resolve_timezone(
+    db: AsyncSession, *, scope: "TenantScope", target_tenant_id: uuid.UUID | None
+) -> str:
+    """Which timezone this particular query should be bucketed in.
+
+    One organisation in the result set means that organisation's own zone, so a Perth
+    tenant sees Perth weeks. A System Admin querying across every tenant has no single
+    answer available — the same incident would belong to different weeks depending on
+    whose zone was chosen — so the platform default is used and echoed in the response
+    rather than a tenant's zone being picked arbitrarily.
+
+    Mirrors `_scope_conds` exactly: whatever that narrows the rows to is what this reads
+    the zone from. The two must not disagree, or the buckets would be computed in a zone
+    belonging to a tenant whose rows were excluded.
+    """
+    tenant_id = target_tenant_id if scope.is_system_admin else scope.tenant_id
+    if tenant_id is None:
+        return settings.reporting_timezone
+    tz_name = await db.scalar(select(Tenant.timezone).where(Tenant.id == tenant_id))
+    return tz_name or settings.reporting_timezone
 
 
 def week_start(day: date) -> date:
@@ -75,7 +107,7 @@ def week_start(day: date) -> date:
 
 
 def resolve_window(
-    week_from: date | None, week_to: date | None
+    week_from: date | None, week_to: date | None, tz_name: str | None = None
 ) -> tuple[date, date]:
     """Apply defaults, validate, and snap OUTWARD to whole ISO weeks.
 
@@ -85,7 +117,7 @@ def resolve_window(
 
     Raises ValidationError with `invalid_date_range` or `date_range_too_large`.
     """
-    resolved_to = week_to if week_to is not None else today_local()
+    resolved_to = week_to if week_to is not None else today_local(tz_name)
     resolved_from = (
         week_from
         if week_from is not None
@@ -108,7 +140,9 @@ def resolve_window(
     return first, last
 
 
-def window_bounds(week_from: date, week_to: date) -> tuple[datetime, datetime]:
+def window_bounds(
+    week_from: date, week_to: date, tz_name: str | None = None
+) -> tuple[datetime, datetime]:
     """Half-open [lower, upper) bounds as timezone-aware datetimes.
 
     Filtering on the raw column keeps the predicate sargable on
@@ -118,7 +152,7 @@ def window_bounds(week_from: date, week_to: date) -> tuple[datetime, datetime]:
     Midnight is never ambiguous in Australia — DST transitions happen at 02:00/03:00 local
     — so `datetime.combine(..., tzinfo=tz)` needs no `fold` disambiguation.
     """
-    tz = reporting_tz()
+    tz = reporting_tz(tz_name)
     lower = datetime.combine(week_from, time.min, tzinfo=tz)
     upper = datetime.combine(week_to + timedelta(days=7), time.min, tzinfo=tz)
     return lower, upper
@@ -160,6 +194,7 @@ async def incident_volume(
     severity: Severity | None,
     week_from: date,
     week_to: date,
+    tz_name: str | None = None,
 ) -> list[tuple[date, int]]:
     """UC-10 steps 2-3 (+ step 5 severity filter): incidents created per week.
 
@@ -168,8 +203,8 @@ async def incident_volume(
     timezone, and a viewer in Perth or on a UTC laptop would produce a different set of
     Mondays than the server bucketed by, so the labels would not line up with the bars.
     """
-    week_expr = _week_expr(settings.reporting_timezone)
-    lower, upper = window_bounds(week_from, week_to)
+    week_expr = _week_expr(tz_name or settings.reporting_timezone)
+    lower, upper = window_bounds(week_from, week_to, tz_name)
 
     conds = _scope_conds(scope, target_tenant_id) + [
         Incident.created_at >= lower,

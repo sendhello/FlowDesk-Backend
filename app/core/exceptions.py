@@ -275,6 +275,12 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_handler(_: Request, exc: StarletteHTTPException) -> JSONResponse:
+        """Render the framework's own errors in the envelope.
+
+        Nothing in `app/` raises `HTTPException` — every application error is an
+        `AppError` and goes to the handler above — so everything arriving here was
+        produced by Starlette's routing.
+        """
         code = {
             status.HTTP_401_UNAUTHORIZED: "unauthorized",
             status.HTTP_403_FORBIDDEN: "forbidden",
@@ -283,8 +289,21 @@ def register_exception_handlers(app: FastAPI) -> None:
             status.HTTP_409_CONFLICT: "conflict",
         }.get(exc.status_code, "http_error")
         message = exc.detail if isinstance(exc.detail, str) else "HTTP error"
+        # D-5's last gap. A scope 404 ("that category is not yours") and a routing 404
+        # ("there is no such URL") shared `code: not_found` and an empty `details`, so they
+        # were distinguishable only by message text. Since this handler never sees an
+        # application 404, a 404 here is always the routing one.
+        details = (
+            {"reason": "route_not_found"}
+            if exc.status_code == status.HTTP_404_NOT_FOUND
+            else None
+        )
         return JSONResponse(
-            status_code=exc.status_code, content=_envelope(code, message)
+            status_code=exc.status_code,
+            content=_envelope(code, message, details),
+            # D-8. Starlette already attaches `Allow` to the 405 it raises
+            # (starlette.routing.Route.handle); this handler used to drop it on the floor.
+            headers=dict(exc.headers) if exc.headers else None,
         )
 
     @app.exception_handler(Exception)

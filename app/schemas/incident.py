@@ -78,6 +78,7 @@ class IncidentOut(BaseModel):
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
     id: uuid.UUID
+    tenant_id: uuid.UUID  # D-7, same reason as UserOut.
     title: str
     severity: Severity
     status: IncidentStatus

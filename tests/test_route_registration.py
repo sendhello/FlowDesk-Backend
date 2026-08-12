@@ -23,6 +23,7 @@ LIVE_PATHS = [
     "/api/v1/notifications/unread-count",
     "/api/v1/analytics/volume",
     "/api/v1/analytics/status-distribution",
+    "/api/v1/settings",
 ]
 
 ANALYTICS_PATHS = [
@@ -104,3 +105,20 @@ async def test_notification_sub_paths_still_accept_post(client, db):
     response = await client.post("/api/v1/notifications/read-all")
 
     assert response.status_code == 200
+
+
+def test_operation_index_matches_the_contract():
+    """The API Contract §1.4 states an operation and path count in prose.
+
+    That number went stale in four separate places once before (A3 report §1), and prose
+    cannot be diffed against reality. This is the smallest thing that makes the claim
+    checkable: if someone adds or removes a route without touching §1.4, this fails and
+    names the new total to write there.
+    """
+    schema = app.openapi()
+    operations = [(path, method) for path, ms in schema["paths"].items() for method in ms]
+
+    assert (len(operations), len(schema["paths"])) == (28, 20), (
+        f"Contract §1.4 says 28 operations across 20 paths; the app now serves "
+        f"{len(operations)} across {len(schema['paths'])}. Update both."
+    )

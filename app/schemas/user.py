@@ -25,6 +25,9 @@ class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
+    # D-7. A Tenant Admin only ever sees one organisation and can ignore this, but a
+    # System Admin's list spans every tenant and had no way to group by organisation.
+    tenant_id: uuid.UUID
     email: str
     name: str
     role: Role

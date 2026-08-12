@@ -16,7 +16,7 @@ from app.api.deps import (
 from app.db.session import get_db
 from app.models.enums import Role
 from app.schemas.category import CategoryCreate, CategoryOut, CategoryUpdate
-from app.schemas.common import Page, Pagination
+from app.schemas.common import Page, Pagination, patched
 from app.services import category_service
 
 router = APIRouter(tags=["categories"])
@@ -77,7 +77,10 @@ async def update_category(
         tenant_id=admin.tenant_id,
         category_id=category_id,
         name=payload.name,
-        description=payload.description,
+        # D-10: `patched` preserves "the client omitted this" all the way to the service,
+        # so an explicit `"description": null` clears the field instead of being read as
+        # "leave it alone".
+        description=patched(payload, "description"),
     )
     return CategoryOut.model_validate(category)
 

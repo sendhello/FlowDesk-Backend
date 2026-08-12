@@ -239,6 +239,15 @@ async def reassign(
         )
 
     previous_assignee_id = incident.assigned_to
+    if previous_assignee_id == target.id:
+        # D-11. Reassigning someone to themselves changed nothing but still notified them
+        # and wrote an audit line, so a double-clicked button read as two hand-offs.
+        #
+        # Placed AFTER both guards on purpose: a closed incident still answers 409 and an
+        # ineligible assignee still answers 422, so the no-op cannot be used to probe
+        # either. Answering 200 with the unchanged record matches the transition endpoint,
+        # which has treated "already in that state" as a satisfied request since Sprint 2.
+        return incident
     incident.assigned_to = target.id
     await notification_service.notify_incident_reassigned(
         db,

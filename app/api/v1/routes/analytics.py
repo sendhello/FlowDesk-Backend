@@ -17,7 +17,6 @@ from datetime import date
 from fastapi import APIRouter, Depends, Query
 
 from app.api.deps import CurrentUser, TenantScope, require_role, tenant_scope
-from app.core.config import settings
 from app.db.session import get_db
 from app.models.enums import Role, Severity
 from app.schemas.analytics import (
@@ -45,8 +44,17 @@ async def incident_volume(
     scope: TenantScope = Depends(tenant_scope),
     db=Depends(get_db),
 ) -> VolumeSeries:
-    """UC-10 steps 2-3, 5: incidents created per week over the requested window."""
-    week_from, week_to = analytics_service.resolve_window(from_date, to_date)
+    """UC-10 steps 2-3, 5: incidents created per week over the requested window.
+
+    The zone is resolved before the window, because "this week" depends on it: run at
+    09:00 Monday in Melbourne it is 06:00 Monday in Perth and 22:00 Sunday in UTC, so the
+    default window's last bucket differs. The resolved zone is echoed in `timezone` so the
+    frontend labels the bars with the same Mondays the server bucketed by.
+    """
+    tz_name = await analytics_service.resolve_timezone(
+        db, scope=scope, target_tenant_id=tenant_id
+    )
+    week_from, week_to = analytics_service.resolve_window(from_date, to_date, tz_name)
     buckets = await analytics_service.incident_volume(
         db,
         scope=scope,
@@ -54,10 +62,11 @@ async def incident_volume(
         severity=severity,
         week_from=week_from,
         week_to=week_to,
+        tz_name=tz_name,
     )
     return VolumeSeries(
         data=[VolumeBucket(week_start=day, count=count) for day, count in buckets],
-        timezone=settings.reporting_timezone,
+        timezone=tz_name,
         from_=week_from,
         to=week_to,
         severity=severity,

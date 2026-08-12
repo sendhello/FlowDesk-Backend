@@ -11,12 +11,14 @@ from app.api.v1.routes import (
     incidents,
     notifications,
     organizations,
+    settings,
     users,
 )
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(auth.router)
 api_router.include_router(organizations.router)
+api_router.include_router(settings.router)
 api_router.include_router(categories.router)
 api_router.include_router(users.router)
 api_router.include_router(incidents.router)

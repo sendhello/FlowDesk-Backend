@@ -147,11 +147,19 @@ async def test_week_start_matches_postgres_date_trunc(db):
         assert from_db == analytics_service.week_start(day), day
 
 
-async def test_utc_reporting_timezone_shifts_buckets(client, db, monkeypatch):
-    """Proves the setting reaches the SQL: under UTC the same incident moves a week back."""
+async def test_the_tenants_timezone_shifts_buckets(client, db):
+    """Proves the tenant's own setting reaches the SQL: under UTC this incident moves a
+    week back.
+
+    23:00 UTC on Sunday 26 July is 09:00 Monday 27 July in Melbourne, so the same row
+    belongs to a different week depending on the zone. It used to be bucketed by
+    `REPORTING_TIMEZONE`, one value for the whole platform; since D-18 the organisation
+    chooses, and this is the assertion that the choice is not cosmetic.
+    """
     fx = await _setup(db)
     await _add(db, fx, datetime(2026, 7, 26, 23, 0, tzinfo=UTC))
-    monkeypatch.setattr(analytics_service.settings, "reporting_timezone", "UTC")
+    fx.tenant.timezone = "UTC"
+    await db.commit()
 
     login_as(fx.admin)
     body = (await client.get(URL, params={"from": "2026-07-13", "to": "2026-08-03"})).json()
@@ -159,6 +167,59 @@ async def test_utc_reporting_timezone_shifts_buckets(client, db, monkeypatch):
     assert body["timezone"] == "UTC"
     assert _bucket(body, date(2026, 7, 20)) == 1
     assert _bucket(body, date(2026, 7, 27)) == 0
+
+
+async def test_the_same_incident_buckets_by_melbourne_for_a_melbourne_tenant(client, db):
+    """The other half of the pair: same instant, default zone, different week. Without
+    this the test above would also pass if the zone were being ignored in a way that
+    happened to land on 20 July."""
+    fx = await _setup(db)
+    await _add(db, fx, datetime(2026, 7, 26, 23, 0, tzinfo=UTC))
+
+    login_as(fx.admin)
+    body = (await client.get(URL, params={"from": "2026-07-13", "to": "2026-08-03"})).json()
+
+    assert body["timezone"] == "Australia/Melbourne"
+    assert _bucket(body, date(2026, 7, 27)) == 1
+    assert _bucket(body, date(2026, 7, 20)) == 0
+
+
+async def test_a_cross_tenant_query_falls_back_to_the_platform_zone(client, db):
+    """A System Admin looking at every organisation at once has no single tenant zone to
+    use, and picking one arbitrarily would bucket some tenants' incidents in a stranger's
+    week. The platform default is used and echoed, so the answer is at least honest about
+    which zone produced it."""
+    fx = await _setup(db)
+    fx.tenant.timezone = "UTC"
+    await db.commit()
+
+    login_as(fx.sysadmin)
+    body = (await client.get(URL, params={"from": "2026-07-13", "to": "2026-08-03"})).json()
+
+    assert body["timezone"] == analytics_service.settings.reporting_timezone
+
+
+async def test_a_system_admin_targeting_one_tenant_uses_that_tenants_zone(client, db):
+    """...and when the query does narrow to one organisation, the fallback must not fire:
+    `resolve_timezone` has to mirror `_scope_conds`, or the buckets would be computed in a
+    zone belonging to rows that were filtered out."""
+    fx = await _setup(db)
+    fx.tenant.timezone = "UTC"
+    await db.commit()
+
+    login_as(fx.sysadmin)
+    body = (
+        await client.get(
+            URL,
+            params={
+                "from": "2026-07-13",
+                "to": "2026-08-03",
+                "tenant_id": str(fx.tenant.id),
+            },
+        )
+    ).json()
+
+    assert body["timezone"] == "UTC"
 
 
 # ---- Zero-fill ------------------------------------------------------------------
